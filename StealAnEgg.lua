@@ -241,28 +241,133 @@ local function animate(st,speed)
     end
 end
 
--- Egg resolver: no startup scan. Search only when an egg is selected/spawned.
+-- Egg resolver. Games often store egg visuals inside nested Models, Tools or Folders,
+-- so resolve the matching visual instead of requiring the named object itself to be a Model.
 local EggCache={}
-local function matchObj(o,want)
-    if want[norm(o.Name)] then return true end
-    for _,a in ipairs({"EggName","DisplayName","ItemName","Title","Type","PetName"}) do local v=o:GetAttribute(a); if v and want[norm(v)] then return true end end
+
+local function eggTextMatches(value,want)
+    local n=norm(value)
+    if n=="" then return false end
+    if want[n] then return true end
+    for alias in pairs(want) do
+        -- Accept common container suffixes/prefixes such as "NightflameEggModel".
+        if #alias>=5 and (n:find(alias,1,true) or alias:find(n,1,true)) then return true end
+    end
     return false
 end
-local function findEgg(name)
-    local c=EggCache[name]; if c and c.Parent then return c end
-    local want={}; for _,a in ipairs(ALIAS[name] or {name}) do want[norm(a)]=true end
-    for _,container in ipairs({ReplicatedStorage,workspace}) do
-        local all=container:GetDescendants()
-        for _,o in ipairs(all) do
-            if o:IsA("Model") and not o:IsDescendantOf(EggFolder) and not o:IsDescendantOf(NPCFolder) and o:FindFirstChildWhichIsA("BasePart",true) and matchObj(o,want) then EggCache[name]=o; return o end
+
+local function matchObj(o,want)
+    if eggTextMatches(o.Name,want) then return true end
+    for _,a in ipairs({"EggName","DisplayName","ItemName","Title","Type","PetName","Name"}) do
+        local v=o:GetAttribute(a)
+        if v~=nil and eggTextMatches(v,want) then return true end
+    end
+    if o:IsA("StringValue") and eggTextMatches(o.Value,want) then return true end
+    return false
+end
+
+local function usableEggSource(o,container)
+    if not o or o==EggFolder or o==NPCFolder then return nil end
+    if o:IsDescendantOf(EggFolder) or o:IsDescendantOf(NPCFolder) then return nil end
+
+    if o:IsA("Model") and o:FindFirstChildWhichIsA("BasePart",true) then return o end
+    if o:IsA("BasePart") then
+        local model=o:FindFirstAncestorOfClass("Model")
+        if model and model~=P.Character and model:IsDescendantOf(container)
+            and model:FindFirstChildWhichIsA("BasePart",true) then
+            return model
         end
-        for _,o in ipairs(all) do
-            if o:IsA("BasePart") and not o:FindFirstAncestorOfClass("Model") and not o:IsDescendantOf(EggFolder) and matchObj(o,want) then EggCache[name]=o; return o end
+        return o
+    end
+
+    local cur=o.Parent
+    while cur and cur~=container do
+        if cur:IsA("Model") and cur~=P.Character and cur:FindFirstChildWhichIsA("BasePart",true) then
+            return cur
+        elseif cur:IsA("Tool") then
+            local handle=cur:FindFirstChildWhichIsA("BasePart",true)
+            if handle then return handle end
+        end
+        cur=cur.Parent
+    end
+
+    if o:IsA("Folder") or o:IsA("Tool") then
+        local model=o:FindFirstChildWhichIsA("Model",true)
+        if model and model:FindFirstChildWhichIsA("BasePart",true) then return model end
+        local part=o:FindFirstChildWhichIsA("BasePart",true)
+        if part then return part end
+    end
+    return nil
+end
+
+local function findEgg(name)
+    local cached=EggCache[name]
+    if cached and cached.Parent then return cached end
+
+    local want={}
+    for _,a in ipairs(ALIAS[name] or {name}) do want[norm(a)]=true end
+
+    for _,container in ipairs({ReplicatedStorage,workspace}) do
+        for _,o in ipairs(container:GetDescendants()) do
+            if not o:IsDescendantOf(EggFolder) and not o:IsDescendantOf(NPCFolder) and matchObj(o,want) then
+                local source=usableEggSource(o,container)
+                if source then
+                    EggCache[name]=source
+                    return source
+                end
+            end
         end
     end
     return nil
 end
-local function availableEggs() local a={}; for i=2,arrlen(EGGS) do if findEgg(EGGS[i]) then table.insert(a,EGGS[i]) end end; return a end
+
+-- Keep every configured type available. If the live game does not replicate a
+-- particular visual to this client, spawnEggs creates a lightweight local egg
+-- instead of failing the whole batch.
+local function availableEggs()
+    local a={}
+    for i=2,arrlen(EGGS) do table.insert(a,EGGS[i]) end
+    return a
+end
+
+local function fallbackEgg(name)
+    local model=Instance.new("Model")
+    model.Name=name
+
+    local part=Instance.new("Part")
+    part.Name="Egg"
+    part.Size=Vector3.new(2.8,3.5,2.8)
+    part.Anchored=true
+    part.CanCollide=false
+    part.CanTouch=false
+    part.CanQuery=true
+    part.Material=Enum.Material.SmoothPlastic
+
+    local hash=0
+    for i=1,#name do hash=(hash+string.byte(name,i)*i)%360 end
+    part.Color=Color3.fromHSV(hash/360,.55,1)
+
+    local mesh=Instance.new("SpecialMesh")
+    mesh.MeshType=Enum.MeshType.Sphere
+    mesh.Scale=Vector3.new(1,1.25,1)
+    mesh.Parent=part
+
+    part.Parent=model
+    model.PrimaryPart=part
+    return model
+end
+
+local function cloneEggVisual(source,name)
+    if source then
+        local ok,clone=pcall(function() return source:Clone() end)
+        if ok and clone then
+            clone.Name=name
+            return clone,false
+        end
+    end
+    return fallbackEgg(name),true
+end
+
 -- Map-center detection. General egg spawning is anchored to this map frame, never the player.
 local MapFloor=nil
 local MapCF=nil
@@ -439,12 +544,7 @@ local function registerEgg(egg,name,scale)
 end
 local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     local mix=nil
-    if name=="MIXED" then
-        mix=availableEggs()
-        if arrlen(mix)==0 then return false,"No matching egg models are replicated to this client." end
-    elseif not findEgg(name) then
-        return false,name.." model is not replicated to this client."
-    end
+    if name=="MIXED" then mix=availableEggs() end
 
     count=math.clamp(tonumber(count) or 1,1,500)
     size=math.clamp(tonumber(size) or 100,25,500)
@@ -457,34 +557,56 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     end
 
     local made=0
+    local fallbackCount=0
     local lastCols=0
     local lastRows=0
     for i=1,count do
         local wanted,row,col,cols,rows=layoutPosition(i,count,size,baseCF,bounds)
         lastCols=cols; lastRows=rows
+
         local en=name
         if name=="MIXED" then en=mixedEggFor(pattern,mix,row,col,i,cols) end
-        local t=en and findEgg(en) or nil
-        if t then
-            pcall(function()
-                local c=t:Clone()
+        if en then
+            local source=findEgg(en)
+            local ok,placedFallback=pcall(function()
+                local c,isFallback=cloneEggVisual(source,en)
                 c.Name=en
                 if batchTag then c:SetAttribute("SAE_Batch",batchTag) end
                 c.Parent=EggFolder
-                local s=scaleEgg(c,size)
+                local scale=scaleEgg(c,size)
                 eggPhysics(c,true)
                 if groundObject(c,wanted,0) then
-                    registerEgg(c,en,s)
+                    registerEgg(c,en,scale)
                     made=made+1
+                    if isFallback then fallbackCount=fallbackCount+1 end
                 else
                     c:Destroy()
                 end
             end)
+            if not ok then
+                -- A malformed replicated asset must not cancel the entire batch.
+                local c=fallbackEgg(en)
+                c.Name=en
+                if batchTag then c:SetAttribute("SAE_Batch",batchTag) end
+                c.Parent=EggFolder
+                local scale=scaleEgg(c,size)
+                eggPhysics(c,true)
+                if groundObject(c,wanted,0) then
+                    registerEgg(c,en,scale)
+                    made=made+1
+                    fallbackCount=fallbackCount+1
+                else
+                    c:Destroy()
+                end
+            end
         end
         if i%20==0 then task.wait() end
     end
-    if made<=0 then return false,"No eggs could be placed on the detected floor." end
-    return true,made,lastCols,lastRows
+
+    if made<=0 then
+        return false,"Egg models were resolved, but the detected floor could not accept any placements."
+    end
+    return true,made,lastCols,lastRows,fallbackCount
 end
 
 local function clearSpawnedEggs(batchTag)
@@ -1152,9 +1274,11 @@ local function markSammySpot()
 end
 
 local function sammyBanner(message)
+    local msg=tostring(message or "")
+    if msg=="" then return end
     local id=P.UserId
     pcall(function() id=Players:GetUserIdFromNameAsync(CFG.SammyUsername) end)
-    notice(id,"Sammy",":", "ANNOUNCEMENT", "- "..tostring(message))
+    notice(id,"Sammy","says:","",msg)
 end
 
 -- Refill and advertising workers. They are idle unless the related switches are ON.
@@ -1635,9 +1759,10 @@ spawnBtn.MouseButton1Click:Connect(function()
         spawnStatus.Text="Server spawn request sent."
         spawnStatus.TextColor3=C.green
     else
-        local ok,made,cols,rows=spawnEggs(en,Amount,EggSize,Pattern,nil,"GENERAL")
+        local ok,made,cols,rows,fallbacks=spawnEggs(en,Amount,EggSize,Pattern,nil,"GENERAL")
         if ok then
-            spawnStatus.Text=tostring(made).." eggs - centered - "..tostring(cols).." per row / "..tostring(rows).." rows."
+            local extra=(fallbacks and fallbacks>0) and (" | "..tostring(fallbacks).." local fallback visual(s)") or ""
+            spawnStatus.Text=tostring(made).." eggs - centered - "..tostring(cols).." per row / "..tostring(rows).." rows."..extra
             spawnStatus.TextColor3=C.green
             notice(P.UserId,Display,": spawned",tostring(made).." EGGS","")
         else
@@ -1935,12 +2060,11 @@ local tagNone=button(BotSammyPage,"No tag",UDim2.fromOffset(0,sy),UDim2.new(1/3,
 local tagAdmin=button(BotSammyPage,"Admin",UDim2.new(1/3,2,0,sy),UDim2.new(1/3,-6,0,34),true)
 local tagCreator=button(BotSammyPage,"Creator",UDim2.new(2/3,4,0,sy),UDim2.new(1/3,-10,0,34),true); sy=sy+42
 local sammyPanelStatus=label(BotSammyPage,"Ready to spawn Sammy.",UDim2.fromOffset(5,sy),UDim2.new(1,-16,0,33),9); sammyPanelStatus.TextColor3=C.muted; sy=sy+42
-section(BotSammyPage,"ADVERTISEMENT MESSAGES",sy); sy=sy+24
-local msg1=textbox(BotSammyPage,"Message 1",UDim2.fromOffset(0,sy),UDim2.new(1,-6,0,46),SammyMessages[1]); sy=sy+53
-local msg2=textbox(BotSammyPage,"Message 2",UDim2.fromOffset(0,sy),UDim2.new(1,-6,0,46),SammyMessages[2]); sy=sy+53
-local msg3=textbox(BotSammyPage,"Message 3",UDim2.fromOffset(0,sy),UDim2.new(1,-6,0,46),SammyMessages[3]); sy=sy+53
-local saveMessages=button(BotSammyPage,"Save all 3",UDim2.fromOffset(0,sy),UDim2.new(1,-6,0,36),false); sy=sy+45
-local adHint=label(BotSammyPage,"Save then use Test banner or ADVERTISE.",UDim2.fromOffset(5,sy),UDim2.new(1,-16,0,32),9); adHint.TextColor3=C.muted; sy=sy+38
+section(BotSammyPage,"ADVERTISEMENT MESSAGES - CLICK ONE TO SEND",sy); sy=sy+24
+local msg1=button(BotSammyPage,SammyMessages[1],UDim2.fromOffset(0,sy),UDim2.new(1,-6,0,48),true); msg1.TextWrapped=true; sy=sy+55
+local msg2=button(BotSammyPage,SammyMessages[2],UDim2.fromOffset(0,sy),UDim2.new(1,-6,0,48),true); msg2.TextWrapped=true; sy=sy+55
+local msg3=button(BotSammyPage,SammyMessages[3],UDim2.fromOffset(0,sy),UDim2.new(1,-6,0,48),true); msg3.TextWrapped=true; sy=sy+55
+local adHint=label(BotSammyPage,"Click any message above and Sammy will announce it on screen.",UDim2.fromOffset(5,sy),UDim2.new(1,-16,0,38),9); adHint.TextColor3=C.muted; adHint.TextWrapped=true; sy=sy+44
 BotSammyPage.CanvasSize=UDim2.fromOffset(0,sy)
 
 spawnSammyButton.MouseButton1Click:Connect(function() if callRemote("SpawnSammy") then sammyPanelStatus.Text="Server Sammy request sent."; sammyPanelStatus.TextColor3=C.green else local ok,msg=spawnSammy(); sammyPanelStatus.Text=msg; sammyPanelStatus.TextColor3=ok and C.green or C.red end end)
@@ -1954,7 +2078,16 @@ sammyDirect.FocusLost:Connect(function(enter) if enter and sammyDirect.Text~="" 
 sammyRemove.MouseButton1Click:Connect(function() despawnSammy(); sammyPanelStatus.Text="Sammy removed."; sammyPanelStatus.TextColor3=C.muted end)
 local function setSammyMode(mode) SammyTagMode=mode; refreshSammyTag(); tagNone.BackgroundColor3=(mode=="NONE") and C.purple or C.card2; tagAdmin.BackgroundColor3=(mode=="ADMIN") and C.purple or C.card2; tagCreator.BackgroundColor3=(mode=="CREATOR") and C.purple or C.card2 end
 tagNone.MouseButton1Click:Connect(function() setSammyMode("NONE") end); tagAdmin.MouseButton1Click:Connect(function() setSammyMode("ADMIN") end); tagCreator.MouseButton1Click:Connect(function() setSammyMode("CREATOR") end)
-saveMessages.MouseButton1Click:Connect(function() SammyMessages[1]=msg1.Text; SammyMessages[2]=msg2.Text; SammyMessages[3]=msg3.Text; adHint.Text="Saved all 3 messages."; adHint.TextColor3=C.green end)
+local function sendSammyAd(index)
+    local msg=SammyMessages[index]
+    if not msg or msg=="" then return end
+    sammyBanner(msg)
+    adHint.Text="Sammy announced message "..tostring(index).."."
+    adHint.TextColor3=C.green
+end
+msg1.MouseButton1Click:Connect(function() sendSammyAd(1) end)
+msg2.MouseButton1Click:Connect(function() sendSammyAd(2) end)
+msg3.MouseButton1Click:Connect(function() sendSammyAd(3) end)
 showBotPage("Collectors")
 refreshSafeUI()
 
