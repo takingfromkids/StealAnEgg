@@ -437,6 +437,7 @@ local SafeObj=nil
 local SafePos=nil
 local SafeName="Not locked"
 local Marker=nil
+local detectSafe=nil
 
 -- Map-center detection. General egg spawning is anchored to the map frame.
 local MapFloor=nil
@@ -481,6 +482,8 @@ local function floorCandidateScore(o)
     local s=o.Size
     if s.X<20 or s.Z<20 then return -1 end
     local score=s.X*s.Z
+    local aspect=math.max(s.X,s.Z)/math.max(1,math.min(s.X,s.Z))
+    score=score*(1+math.min(2.5,math.max(0,aspect-1))*.28)
     if s.Y<=18 then score=score*1.5 end
     local n=norm(o.Name)
     if n:find("floor",1,true) or n:find("ground",1,true) or n:find("arena",1,true) or n:find("map",1,true) then score=score*1.8 end
@@ -506,7 +509,8 @@ local function detectMapCenter()
     -- could make the Safe Zone itself become "the map".
     for _,o in ipairs(workspace:GetDescendants()) do
         if o:IsA("BasePart") and not o:IsDescendantOf(EggFolder) and not o:IsDescendantOf(NPCFolder) then
-            local base=floorCandidateScore(o)
+            local belongsToSafe=SafeObj and (o==SafeObj or (SafeObj:IsA("Model") and o:IsDescendantOf(SafeObj)))
+            local base=belongsToSafe and -1 or floorCandidateScore(o)
             if base>=0 then
                 local topY=o.CFrame:PointToWorldSpace(Vector3.new(0,o.Size.Y/2,0)).Y
                 local vertical=math.abs(topY-playY)
@@ -614,6 +618,12 @@ end
 local COMPACT_SPAWN_BOUNDS=Vector3.new(155,1,250)
 
 local function spawnAvoidAnchor(mapCF,mapBounds)
+    -- Resolve the Safe Zone automatically before GENERAL spawning. This runs
+    -- only when we do not already have a locked/detected Safe Zone.
+    if not SafePos and detectSafe then
+        pcall(function() detectSafe() end)
+    end
+
     -- Prefer the explicitly detected/marked Safe Zone.
     local anchor=nil
     local clearance=42
@@ -654,6 +664,17 @@ end
 local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
     if preferredCF then
         return preferredCF,COMPACT_SPAWN_BOUNDS
+    end
+
+    -- Safe detection may not have happened during startup yet.
+    if not SafePos and detectSafe then pcall(function() detectSafe() end) end
+
+    if MapFloor and SafeObj and
+        (MapFloor==SafeObj or (SafeObj:IsA("Model") and MapFloor:IsDescendantOf(SafeObj))) then
+        MapFloor=nil
+        MapCF=nil
+        MapSize=nil
+        detectMapCenter()
     end
 
     local mapCF,mapBounds=getMapFrame()
@@ -1746,7 +1767,7 @@ local function safePosition() if SafeObj and SafeObj.Parent then local p=objPos(
 local function marker()
     if Marker then Marker:Destroy(); Marker=nil end; local p=safePosition(); if not p then return end; local x=Instance.new("Part"); x.Name="SAE_SafeZoneMarker"; x.Size=Vector3.new(8,.08,8); x.Anchored=true; x.CanCollide=false; x.CanTouch=false; x.CanQuery=false; x.Material=Enum.Material.Neon; x.Color=Color3.fromRGB(80,255,120); x.Transparency=.82; x.Position=p+Vector3.new(0,.08,0); x.Parent=workspace; Marker=x
 end
-local function detectSafe()
+detectSafe=function()
     local pr=P.Character and P.Character:FindFirstChild("HumanoidRootPart"); local pp=pr and pr.Position or Vector3.zero; local best=nil; local score=-1e9
     for _,o in ipairs(workspace:GetDescendants()) do
         if (o:IsA("BasePart") or o:IsA("Model")) and not o:IsDescendantOf(EggFolder) and not o:IsDescendantOf(NPCFolder) then
@@ -2488,6 +2509,7 @@ rescanBtn.MouseButton1Click:Connect(function() EggCache={}; EggTemplateCache={};
 -- refreshMapStatus does not have to remain a top-level local.
 task.spawn(function()
     task.wait(.6)
+    if detectSafe then pcall(function() detectSafe() end) end
     detectMapCenter()
     refreshMapStatus()
 end)
