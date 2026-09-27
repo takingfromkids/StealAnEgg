@@ -571,25 +571,42 @@ end
 
 local function physicalLayout(count,sizeValue,baseCF,bounds)
     local scale=math.clamp(sizeValue,25,500)/100
-    local usableX=math.max(70,bounds.X*.84)
-    local usableZ=math.max(90,bounds.Z*.82)
 
-    -- A wider, more rectangular grid gives each row visible separation.
-    local aspect=math.max(.65,math.min(1.7,usableX/usableZ))
-    local cols=math.ceil(math.sqrt(count*aspect))
-    cols=math.clamp(cols,10,28)
-    local rows=math.ceil(count/cols)
+    -- Leave an outer border so the actual egg mesh, not just its pivot,
+    -- stays comfortably inside the map.
+    local marginX=math.max(10,5+scale*5)
+    local marginZ=math.max(12,6+scale*6)
+    local usableX=math.max(24,bounds.X-marginX*2)
+    local usableZ=math.max(30,bounds.Z-marginZ*2)
 
-    -- Prefer visibly separated rows. If the requested quantity is too large for
-    -- the map, compress only as much as necessary rather than bundling everything.
-    local desiredX=math.max(8,6.5+scale*4.5)
-    local desiredZ=math.max(10,8+scale*5.5)
-    local sx=math.min(desiredX,usableX/math.max(cols,1))
-    local sz=math.min(desiredZ,usableZ/math.max(rows,1))
+    local desiredX=math.max(8.5,7+scale*4.5)
+    local desiredZ=math.max(11,9+scale*5.5)
 
-    sx=math.max(5.5,sx)
-    sz=math.max(7.5,sz)
-    return cols,rows,sx,sz
+    local bestCols=10
+    local bestRows=math.ceil(count/bestCols)
+    local bestScore=-math.huge
+
+    -- Try several grid shapes and choose the one that gets closest to our
+    -- desired row/column gaps without exceeding the map rectangle.
+    for cols=8,32 do
+        local rows=math.ceil(count/cols)
+        local fitX=(cols<=1) and usableX or (usableX/(cols-1))
+        local fitZ=(rows<=1) and usableZ or (usableZ/(rows-1))
+        local score=math.min(fitX/desiredX,fitZ/desiredZ)
+
+        -- Small preference for wider row spacing because that was the cramped axis.
+        score=score+math.min(fitZ/desiredZ,1)*.08
+
+        if score>bestScore then
+            bestScore=score
+            bestCols=cols
+            bestRows=rows
+        end
+    end
+
+    local sx=(bestCols<=1) and 0 or math.min(desiredX,usableX/(bestCols-1))
+    local sz=(bestRows<=1) and 0 or math.min(desiredZ,usableZ/(bestRows-1))
+    return bestCols,bestRows,sx,sz
 end
 
 local function layoutPosition(index,count,sizeValue,baseCF,bounds)
@@ -1403,7 +1420,16 @@ local function refreshSammyTag()
 end
 
 local function placeNPC(m,pos,dir)
-    local r=m:FindFirstChild("HumanoidRootPart"); local h=m:FindFirstChildOfClass("Humanoid"); if not r or not h then return end; local hit=groundHit(pos,m); local y=hit and hit.Position.Y+h.HipHeight+r.Size.Y/2 or pos.Y; local d=Vector3.new(dir.X,0,dir.Z); if d.Magnitude<.1 then d=Vector3.new(0,0,-1) else d=d.Unit end; m:PivotTo(CFrame.lookAt(Vector3.new(pos.X,y,pos.Z),Vector3.new(pos.X,y,pos.Z)+d)); r.AssemblyLinearVelocity=Vector3.zero; r.AssemblyAngularVelocity=Vector3.zero
+    local r=m:FindFirstChild("HumanoidRootPart")
+    local h=m:FindFirstChildOfClass("Humanoid")
+    if not r or not h then return end
+    local hit=groundHitNear(pos,m)
+    local y=hit and hit.Position.Y+h.HipHeight+r.Size.Y/2 or pos.Y
+    local d=Vector3.new(dir.X,0,dir.Z)
+    if d.Magnitude<.1 then d=Vector3.new(0,0,-1) else d=d.Unit end
+    m:PivotTo(CFrame.lookAt(Vector3.new(pos.X,y,pos.Z),Vector3.new(pos.X,y,pos.Z)+d))
+    r.AssemblyLinearVelocity=Vector3.zero
+    r.AssemblyAngularVelocity=Vector3.zero
 end
 local function despawnSammy() SammyGen=SammyGen+1; if Sammy then Sammy:Destroy(); Sammy=nil end end
 local function spawnSammy()
@@ -1505,7 +1531,7 @@ end)
 -- Safe zone and bots.
 local SafeObj=nil; local SafePos=nil; local SafeName="Not locked"; local Marker=nil
 local function objPos(o) if not o then return nil end; if o:IsA("BasePart") then return o.Position elseif o:IsA("Model") then return o:GetPivot().Position end end
-local function safePosition() if SafeObj and SafeObj.Parent then local p=objPos(SafeObj); if p then local hit=groundHit(p,nil); SafePos=hit and hit.Position or p end end; return SafePos end
+local function safePosition() if SafeObj and SafeObj.Parent then local p=objPos(SafeObj); if p then local hit=groundHitNear(p,nil); SafePos=hit and hit.Position or p end end; return SafePos end
 local function marker()
     if Marker then Marker:Destroy(); Marker=nil end; local p=safePosition(); if not p then return end; local x=Instance.new("Part"); x.Name="SAE_SafeZoneMarker"; x.Size=Vector3.new(8,.08,8); x.Anchored=true; x.CanCollide=false; x.CanTouch=false; x.CanQuery=false; x.Material=Enum.Material.Neon; x.Color=Color3.fromRGB(80,255,120); x.Transparency=.82; x.Position=p+Vector3.new(0,.08,0); x.Parent=workspace; Marker=x
 end
@@ -1519,7 +1545,7 @@ local function detectSafe()
     end
     if not best then return false,"Safe zone not auto-detected. Stand in it and press SET HERE." end; SafeObj=best; SafePos=objPos(best); SafeName=best.Name; marker(); return true,SafeName
 end
-local function setSafeHere() local r=P.Character and P.Character:FindFirstChild("HumanoidRootPart"); if not r then return false,"Character unavailable." end; local hit=groundHit(r.Position,nil); SafeObj=nil; SafePos=hit and hit.Position or r.Position; SafeName="Manual Safe Zone"; marker(); return true,SafeName end
+local function setSafeHere() local r=P.Character and P.Character:FindFirstChild("HumanoidRootPart"); if not r then return false,"Character unavailable." end; local hit=groundHitNear(r.Position,nil); SafeObj=nil; SafePos=hit and hit.Position or (r.Position-Vector3.new(0,3,0)); SafeName="Manual Safe Zone"; marker(); return true,SafeName end
 
 local Bots={}
 local function botPool() local a={}; for _,p in ipairs(Players:GetPlayers()) do if p~=P then table.insert(a,p.UserId) end end; return a end
@@ -1648,7 +1674,7 @@ local function botBrain(d)
                 if target then
                     local er=rootOf(target)
                     if er then
-                        local hit=groundHit(er.Position,m)
+                        local hit=groundHitNear(er.Position,m)
                         h:MoveTo(hit and hit.Position or er.Position)
                         local hd=horizontalDistance(r.Position,er.Position)
                         if hd<=12 then
