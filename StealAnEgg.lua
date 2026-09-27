@@ -204,6 +204,14 @@ local function groundHit(pos,ignore)
     local ex={EggFolder,NPCFolder}; if P.Character then table.insert(ex,P.Character) end; if ignore then table.insert(ex,ignore) end; rp.FilterDescendantsInstances=ex
     return workspace:Raycast(pos+Vector3.new(0,250,0),Vector3.new(0,-1000,0),rp)
 end
+
+local function groundHitNear(pos,ignore)
+    -- Short raycast around the active character height. This avoids choosing
+    -- roofs/ceilings that a 250-stud-above ray can hit first.
+    local rp=RaycastParams.new(); rp.FilterType=Enum.RaycastFilterType.Exclude
+    local ex={EggFolder,NPCFolder}; if P.Character then table.insert(ex,P.Character) end; if ignore then table.insert(ex,ignore) end; rp.FilterDescendantsInstances=ex
+    return workspace:Raycast(pos+Vector3.new(0,10,0),Vector3.new(0,-80,0),rp)
+end
 local function groundObject(o,pos,yaw)
     -- Prefer the real raycast floor, but never throw an egg away just because
     -- the game's floor has CanQuery disabled or the executor misses the raycast.
@@ -483,8 +491,8 @@ end
 local function setMapCenterHere()
     local r=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
     if not r then return false,"Character unavailable." end
-    local hit=groundHit(r.Position,nil)
-    local pos=hit and hit.Position or r.Position
+    local hit=groundHitNear(r.Position,nil)
+    local pos=hit and hit.Position or (r.Position-Vector3.new(0,3,0))
     MapFloor=nil
     MapCF=CFrame.new(pos)
     MapSize=Vector3.new(140,1,220)
@@ -522,14 +530,19 @@ local function visibleSpawnFrame(preferredCF)
     -- detection is kept for Settings/debugging, but it no longer decides where
     -- a huge egg batch appears.
     if root then
-        local hit=groundHit(root.Position,nil)
+        local hit=groundHitNear(root.Position,nil)
         local ground=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
         local forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
         if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
 
         local center=ground+forward*75
-        local frontHit=groundHit(center,nil)
-        if frontHit then center=frontHit.Position end
+        local probe=Vector3.new(center.X,root.Position.Y,center.Z)
+        local frontHit=groundHitNear(probe,nil)
+        if frontHit then
+            center=frontHit.Position
+        else
+            center=Vector3.new(center.X,ground.Y,center.Z)
+        end
         return CFrame.lookAt(center,center+forward),Vector3.new(180,1,220)
     end
 
@@ -660,7 +673,7 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
 
     -- Use one ground height for the whole batch. Hundreds of raycasts and
     -- hundreds of cloned game models were causing the freezes.
-    local centerHit=groundHit(baseCF.Position,nil)
+    local centerHit=groundHitNear(baseCF.Position,nil)
     local baseY=centerHit and centerHit.Position.Y or baseCF.Position.Y
     baseCF=CFrame.new(baseCF.Position.X,baseY,baseCF.Position.Z)
         * CFrame.Angles(0,math.atan2(-baseCF.LookVector.X,-baseCF.LookVector.Z),0)
@@ -1336,8 +1349,8 @@ local function sammyBatchCenter()
     if Sammy and Sammy.Parent then
         local r=Sammy:FindFirstChild("HumanoidRootPart")
         if r then
-            local hit=groundHit(r.Position,Sammy)
-            local p=hit and hit.Position or r.Position
+            local hit=groundHitNear(r.Position,Sammy)
+            local p=hit and hit.Position or (r.Position-Vector3.new(0,3,0))
             return select(1,visibleSpawnFrame(CFrame.new(p)))
         end
     end
@@ -1370,8 +1383,8 @@ end
 local function markSammySpot()
     local r=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
     if not r then return false,"Character unavailable." end
-    local hit=groundHit(r.Position,nil)
-    local p=hit and hit.Position or r.Position
+    local hit=groundHitNear(r.Position,nil)
+    local p=hit and hit.Position or (r.Position-Vector3.new(0,3,0))
     SammySpot=CFrame.new(p)
     return true,"Sammy egg spot marked."
 end
