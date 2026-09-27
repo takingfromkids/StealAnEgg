@@ -378,13 +378,38 @@ local function sanitizeEggClone(clone)
     end
 end
 
+local function cloneLooksUsable(clone)
+    local visible=false
+    local parts=0
+    if clone:IsA("BasePart") then
+        parts=1
+        visible=clone.Transparency<.95 and clone.Size.Magnitude>.1
+        return visible
+    end
+    if not clone:IsA("Model") then return false end
+    for _,o in ipairs(clone:GetDescendants()) do
+        if o:IsA("BasePart") then
+            parts=parts+1
+            if o.Transparency<.95 and o.Size.Magnitude>.1 then visible=true end
+            if parts>120 then return false end
+        end
+    end
+    if not visible then return false end
+    local ok,size=pcall(function() return clone:GetExtentsSize() end)
+    if not ok or size.Magnitude<.1 or math.max(size.X,size.Y,size.Z)>90 then return false end
+    return true
+end
+
 local function cloneEggVisual(source,name)
     if source then
         local ok,clone=pcall(function() return source:Clone() end)
         if ok and clone then
             clone.Name=name
             sanitizeEggClone(clone)
-            return clone,false
+            if cloneLooksUsable(clone) then
+                return clone,false
+            end
+            pcall(function() clone:Destroy() end)
         end
     end
     return fallbackEgg(name),true
@@ -1789,13 +1814,16 @@ section(EggsPage,"QUANTITY",129)
 local amountValues={200,250,300,350,400,450,500}
 local amountButtons={}
 for i,v in ipairs(amountValues) do
+    local value=v
     local row=(i<=4) and 0 or 1
     local col=(row==0) and (i-1) or (i-5)
-    local b=button(EggsPage,tostring(v),UDim2.fromOffset(4+col*85,150+row*31),UDim2.fromOffset(78,26),true)
-    amountButtons[v]=b
+    local b=button(EggsPage,tostring(value),UDim2.fromOffset(4+col*85,150+row*31),UDim2.fromOffset(78,26),true)
+    amountButtons[value]=b
     b.MouseButton1Click:Connect(function()
-        Amount=v
+        Amount=value
         for k,x in pairs(amountButtons) do x.BackgroundColor3=(k==Amount) and C.purple or C.card2 end
+        spawnStatus.Text="Quantity selected: "..tostring(Amount)
+        spawnStatus.TextColor3=C.muted
     end)
 end
 amountButtons[200].BackgroundColor3=C.purple
@@ -1841,16 +1869,17 @@ local patternDescriptions={
 }
 local patStatus=label(PatternPage,"MIXED EGGS - select a pattern",UDim2.fromOffset(5,3),UDim2.new(1,-10,0,25),11); patStatus.Font=Enum.Font.GothamBold
 for i,n in ipairs(PATTERNS) do
+    local patternName=n
     local row=math.floor((i-1)/2); local col=(i-1)%2
     local wide=(i==arrlen(PATTERNS) and (arrlen(PATTERNS)%2==1))
     local pos=wide and UDim2.fromOffset(4,35+row*58) or UDim2.new(col*.5,col==0 and 4 or 4,0,35+row*58)
     local sz=wide and UDim2.new(1,-8,0,49) or UDim2.new(.5,-8,0,49)
-    local b=button(PatternPage,n, pos, sz,true)
+    local b=button(PatternPage,patternName, pos, sz,true)
     b.TextSize=10
     b.MouseButton1Click:Connect(function()
-        Pattern=n
-        patternBtn.Text="Layout: "..n
-        patStatus.Text=n.." selected"
+        Pattern=patternName
+        patternBtn.Text="Layout: "..patternName
+        patStatus.Text=patternName.." selected"
         showAdminPage("Spawn eggs",false)
     end)
 end
