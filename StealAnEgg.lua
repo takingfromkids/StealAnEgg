@@ -1589,13 +1589,68 @@ end
 local function setSafeHere() local r=P.Character and P.Character:FindFirstChild("HumanoidRootPart"); if not r then return false,"Character unavailable." end; local hit=groundHitNear(r.Position,nil); SafeObj=nil; SafePos=hit and hit.Position or (r.Position-Vector3.new(0,3,0)); SafeName="Manual Safe Zone"; marker(); return true,SafeName end
 
 local Bots={}
-local function botPool() local a={}; for _,p in ipairs(Players:GetPlayers()) do if p~=P then table.insert(a,p.UserId) end end; return a end
-local function fallbackBot(i)
-    local d=Players:GetHumanoidDescriptionFromUserId(P.UserId):Clone(); local cols={Color3.fromRGB(245,205,48),Color3.fromRGB(80,175,255),Color3.fromRGB(255,120,120),Color3.fromRGB(125,255,150),Color3.fromRGB(185,120,255),Color3.fromRGB(255,180,90),Color3.fromRGB(105,225,220),Color3.fromRGB(220,220,220),Color3.fromRGB(255,115,220),Color3.fromRGB(150,195,255)}; local c=cols[((i-1)%arrlen(cols))+1]
-    pcall(function() d.HeadColor=c; d.LeftArmColor=c; d.RightArmColor=c; d.LeftLegColor=c; d.RightLegColor=c; d.TorsoColor=c; d.HeightScale=.9+(i%5)*.03; d.WidthScale=.9+(i%3)*.04 end)
-    return Players:CreateHumanoidModelFromDescription(d,Enum.HumanoidRigType.R15)
+
+-- Collector bots are generated locally and do NOT depend on how many real
+-- players are in the server. Selecting 1-10 always attempts that exact count.
+local BaseBotDescription=nil
+local function getBaseBotDescription()
+    if BaseBotDescription then return BaseBotDescription end
+    local desc=nil
+    pcall(function() desc=Players:GetHumanoidDescriptionFromUserId(P.UserId) end)
+    BaseBotDescription=desc or Instance.new("HumanoidDescription")
+    return BaseBotDescription
 end
-local function botAvatar(i,pool) local uid=pool[i]; if uid then local ok,m=pcall(function() return createAvatar(uid) end); if ok and m then return m end end; return fallbackBot(i) end
+
+local function fallbackBot(i)
+    local d=getBaseBotDescription():Clone()
+    local cols={
+        Color3.fromRGB(245,205,48),Color3.fromRGB(80,175,255),Color3.fromRGB(255,120,120),
+        Color3.fromRGB(125,255,150),Color3.fromRGB(185,120,255),Color3.fromRGB(255,180,90),
+        Color3.fromRGB(105,225,220),Color3.fromRGB(220,220,220),Color3.fromRGB(255,115,220),
+        Color3.fromRGB(150,195,255)
+    }
+    local c=cols[((i-1)%arrlen(cols))+1]
+    pcall(function()
+        d.HeadColor=c
+        d.LeftArmColor=c
+        d.RightArmColor=c
+        d.LeftLegColor=c
+        d.RightLegColor=c
+        d.TorsoColor=c
+        d.HeightScale=.94+((i-1)%4)*.025
+        d.WidthScale=.92+((i-1)%3)*.035
+        d.HeadScale=.95+((i-1)%3)*.025
+    end)
+
+    local model=nil
+    local ok=pcall(function()
+        model=Players:CreateHumanoidModelFromDescription(d,Enum.HumanoidRigType.R15)
+    end)
+    if ok and model then return model end
+
+    -- Last-resort clone: still independent of other players in the server.
+    local ch=P.Character
+    if ch then
+        local oldArchivable=ch.Archivable
+        ch.Archivable=true
+        pcall(function() model=ch:Clone() end)
+        ch.Archivable=oldArchivable
+        if model then
+            for _,o in ipairs(model:GetDescendants()) do
+                if o:IsA("Script") or o:IsA("LocalScript") or o:IsA("Tool") then
+                    pcall(function() o:Destroy() end)
+                end
+            end
+            return model
+        end
+    end
+    return nil
+end
+
+local function botAvatar(i)
+    return fallbackBot(i)
+end
+
 local function botTag(m,id,trailName,stat)
     local head=m:FindFirstChild("Head")
     if not head then return end
@@ -1759,8 +1814,6 @@ local function spawnBots(n)
     clearBots()
     CollectorsEnabled=true
     n=math.clamp(n,1,10)
-    local pool=botPool()
-
     local eggTarget=nil
     local nearest=nearestEgg(safe,"BOT_SPAWN_LOOK")
     local er=nearest and rootOf(nearest) or nil
@@ -1772,7 +1825,10 @@ local function spawnBots(n)
     local right=Vector3.new(-dir.Z,0,dir.X)
 
     for i=1,n do
-        local ok,m=pcall(function() return botAvatar(i,pool) end)
+        local ok,m=pcall(function() return botAvatar(i) end)
+        if (not ok) or (not m) then
+            ok,m=pcall(function() return fallbackBot(i) end)
+        end
         if ok and m then
             m.Name="Egg Bot "..i
             m.Parent=NPCFolder
