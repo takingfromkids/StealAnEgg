@@ -617,48 +617,201 @@ end
 
 local COMPACT_SPAWN_BOUNDS=Vector3.new(155,1,250)
 
-local function spawnAvoidAnchor(mapCF,mapBounds)
-    -- Resolve the Safe Zone automatically before GENERAL spawning. This runs
-    -- only when we do not already have a locked/detected Safe Zone.
-    if not SafePos and detectSafe then
-        pcall(function() detectSafe() end)
+local function safeClearanceRadius()
+    -- Hard minimum keeps GENERAL eggs out of the white Safe Zone even when the
+    -- game's Safe Zone object has an unhelpful name or auto-detection misses it.
+    local radius=70
+    if SafeObj and SafeObj.Parent then
+        if SafeObj:IsA("BasePart") then
+            radius=math.max(radius,math.max(SafeObj.Size.X,SafeObj.Size.Z)*.5+18)
+        elseif SafeObj:IsA("Model") then
+            local ok,_,sz=pcall(function() return SafeObj:GetBoundingBox() end)
+            if ok and sz then
+                radius=math.max(radius,math.max(sz.X,sz.Z)*.5+18)
+            end
+        end
+    end
+    return math.clamp(radius,70,110)
+end
+
+local function playableGroundHit(pos,referenceY)
+    local hit=groundHitNear(pos,nil)
+    if not hit then return nil end
+    if referenceY and math.abs(hit.Position.Y-referenceY)>16 then return nil end
+    return hit
+end
+
+local function findPlayableSpawnFrame()
+    local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return nil,nil end
+
+    -- Always try to learn the Safe Zone, but do not depend on it. The player's
+    -- current position is also treated as a hard no-spawn anchor because the
+    -- user normally presses Spawn while standing in the Safe Zone.
+    if not SafePos and detectSafe then pcall(function() detectSafe() end) end
+
+    local under=groundHitNear(root.Position,nil)
+    local groundY=under and under.Position.Y or (root.Position.Y-3)
+    local forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
+    if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
+    local right=Vector3.new(-forward.Z,0,forward.X)
+
+    local dirs={
+        forward,
+        (forward+right).Unit,
+        (forward-right).Unit,
+        right,
+        -right,
+        (-forward+right).Unit,
+        (-forward-right).Unit,
+        -forward
+    }
+
+    local startDistance=safeClearanceRadius()
+    local maxDistance=340
+    local step=8
+    local best=nil
+
+    for index,dir in ipairs(dirs) do
+        local first=nil
+        local last=nil
+        local valid=0
+        local misses=0
+        local floorVotes={}
+
+        for d=startDistance,maxDistance,step do
+            local probe=root.Position+dir*d
+            local hit=playableGroundHit(Vector3.new(probe.X,root.Position.Y,probe.Z),groundY)
+            if hit then
+                if not first then first=d end
+                last=d
+                valid=valid+1
+                misses=0
+                floorVotes[hit.Instance]=(floorVotes[hit.Instance] or 0)+1
+            elseif first then
+                misses=misses+1
+                if misses>=2 then break end
+            end
+        end
+
+        if first and last and valid>=6 then
+            local run=last-first
+            local endPoint=root.Position+dir*last
+            local safeAnchor=SafePos or root.Position
+            local away=(Vector3.new(endPoint.X,0,endPoint.Z)-Vector3.new(safeAnchor.X,0,safeAnchor.Z)).Magnitude
+
+            -- Prefer the direction the player is looking, but geometry/run length
+            -- still wins when the actual arena clearly continues another way.
+            local facingBonus=math.max(-1,math.min(1,dir:Dot(forward)))*22
+            local score=run+away*.12+facingBonus
+
+            local votedFloor=nil
+            local votedCount=0
+            for floorPart,n in pairs(floorVotes) do
+                if n>votedCount then votedCount=n; votedFloor=floorPart end
+            end
+
+            if not best or score>best.score then
+                best={dir=dir,first=first,last=last,score=score,floor=votedFloor}
+            end
+        end
     end
 
-    -- Prefer the explicitly detected/marked Safe Zone.
-    local anchor=nil
-    local clearance=42
+    if not best then return nil,nil end
+
+    local dir=best.dir
+
+    -- If the sampled play floor is a real rectangular floor piece, snap rows to
+    -- its closest horizontal axis so rows stay perfectly straight, never wonky.
+    if best.floor and best.floor:IsA("BasePart") then
+        local look=Vector3.new(best.floor.CFrame.LookVector.X,0,best.floor.CFrame.LookVector.Z)
+        local rgt=Vector3.new(best.floor.CFrame.RightVector.X,0,best.floor.CFrame.RightVector.Z)
+        if look.Magnitude>.01 then look=look.Unit end
+        if rgt.Magnitude>.01 then rgt=rgt.Unit end
+        local axis=(math.abs(dir:Dot(look))>=math.abs(dir:Dot(rgt))) and look or rgt
+        if axis.Magnitude>.01 then
+            if axis:Dot(dir)<0 then axis=-axis end
+            dir=axis
+        end
+    end
+
+    -- Re-scan along the straightened direction so the near edge ALWAYS starts
+    -- outside the Safe Zone and the far edge reaches the end of usable ground.
+    local first=nil
+    local last=nil
+    local misses=0
+    for d=startDistance,maxDistance,step do
+        local probe=root.Position+dir*d
+        local hit=playableGroundHit(Vector3.new(probe.X,root.Position.Y,probe.Z),groundY)
+        if hit then
+            if not first then first=d end
+            last=d
+            misses=0
+        elseif first then
+            misses=misses+1
+            if misses>=2 then break end
+        end
+    end
+    if not first or not last or (last-first)<45 then return nil,nil end
+
+    -- Measure usable width at several points down the play area. Taking the
+    -- narrowest sample prevents rows clipping into side walls while still using
+    -- nearly all of the actual map width.
+    local side=Vector3.new(-dir.Z,0,dir.X)
+    local minHalfWidth=math.huge
+    for _,frac in ipairs({.18,.38,.58,.78}) do
+        local d=first+(last-first)*frac
+        local centerProbe=root.Position+dir*d
+        local left=0
+        local rightWidth=0
+        for s=6,100,6 do
+            local p=centerProbe-side*s
+            if playableGroundHit(Vector3.new(p.X,root.Position.Y,p.Z),groundY) then left=s else break end
+        end
+        for s=6,100,6 do
+            local p=centerProbe+side*s
+            if playableGroundHit(Vector3.new(p.X,root.Position.Y,p.Z),groundY) then rightWidth=s else break end
+        end
+        local half=math.min(left,rightWidth)
+        if half>=18 then minHalfWidth=math.min(minHalfWidth,half) end
+    end
+
+    local width
+    if minHalfWidth<math.huge then
+        width=math.clamp(minHalfWidth*2,55,170)
+    else
+        width=155
+    end
+
+    local nearEdge=first+4
+    local farEdge=last-4
+    local depth=farEdge-nearEdge
+    if depth<45 then return nil,nil end
+
+    local centerDistance=(nearEdge+farEdge)/2
+    local center=root.Position+dir*centerDistance
+    center=Vector3.new(center.X,groundY,center.Z)
+
+    return CFrame.lookAt(center,center+dir),Vector3.new(width,1,depth)
+end
+
+local function spawnAvoidAnchor(mapCF,mapBounds)
+    -- Fallback exclusion used only if geometry sampling cannot identify the
+    -- playable corridor. It still enforces a large Safe Zone/player buffer.
+    local anchor=SafePos
+    local clearance=safeClearanceRadius()
 
     if SafeObj and SafeObj.Parent then
         if SafeObj:IsA("BasePart") then
             anchor=SafeObj.Position
-            clearance=math.clamp(math.max(SafeObj.Size.X,SafeObj.Size.Z)*.5+14,34,62)
         elseif SafeObj:IsA("Model") then
             anchor=SafeObj:GetPivot().Position
-            local ok,_,sz=pcall(function() return SafeObj:GetBoundingBox() end)
-            if ok and sz then
-                clearance=math.clamp(math.max(sz.X,sz.Z)*.5+14,34,62)
-            end
         end
     end
-    if not anchor and SafePos then
-        anchor=SafePos
-        clearance=42
-    end
-    if anchor then return anchor,clearance end
 
-    -- Before the Safe Zone is manually locked, the player is a useful fallback
-    -- only when they are near an end of the long arena (where the Safe Zone is).
     local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
-    if root and mapCF and mapBounds then
-        local lp=mapCF:PointToObjectSpace(root.Position)
-        local nearEnd=math.abs(lp.Z)>=math.max(28,mapBounds.Z*.24)
-        local hit=groundHitNear(root.Position,nil)
-        local onReserved=hit and hit.Instance and reservedZoneName(hit.Instance.Name)
-        if nearEnd or onReserved then
-            return root.Position,42
-        end
-    end
-    return nil,nil
+    if not anchor and root then anchor=root.Position end
+    return anchor,clearance
 end
 
 local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
@@ -666,9 +819,16 @@ local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
         return preferredCF,COMPACT_SPAWN_BOUNDS
     end
 
-    -- Safe detection may not have happened during startup yet.
-    if not SafePos and detectSafe then pcall(function() detectSafe() end) end
+    -- GENERAL spawn path: determine the real playable ground beyond the Safe
+    -- Zone first. This is intentionally independent of object names.
+    local playCF,playBounds=findPlayableSpawnFrame()
+    if playCF and playBounds then
+        return playCF,playBounds
+    end
 
+    -- Geometry fallback: use detected map floor, but carve out a large band
+    -- around the Safe Zone/player. Never silently fall back to the full map.
+    if not SafePos and detectSafe then pcall(function() detectSafe() end) end
     if MapFloor and SafeObj and
         (MapFloor==SafeObj or (SafeObj:IsA("Model") and MapFloor:IsDescendantOf(SafeObj))) then
         MapFloor=nil
@@ -681,9 +841,6 @@ local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
     if not mapCF then return CFrame.new(),COMPACT_SPAWN_BOUNDS end
     mapBounds=mapBounds or COMPACT_SPAWN_BOUNDS
 
-    -- Reserve a full-width no-spawn band around the Safe Zone and use the
-    -- longer remaining side of the arena. This guarantees GENERAL eggs are
-    -- shifted AWAY from the Safe Zone instead of merely centred on the map.
     local anchor,clearance=spawnAvoidAnchor(mapCF,mapBounds)
     if anchor then
         local scale=math.clamp(tonumber(sizeValue) or 100,25,500)/100
@@ -703,15 +860,25 @@ local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
 
         local a,b
         if leftLen>=rightLen then a,b=leftA,leftB else a,b=rightA,rightB end
-
-        -- Only crop the arena when the reserved band actually leaves a useful
-        -- play area. Otherwise keep the detected map bounds as a safe fallback.
-        if a and b and (b-a)>=55 then
+        if a and b and (b-a)>=45 then
             local centerZ=(a+b)/2
             local regionDepth=b-a
-            local shifted=mapCF*CFrame.new(0,0,centerZ)
-            return shifted,Vector3.new(mapBounds.X,mapBounds.Y,regionDepth)
+            return mapCF*CFrame.new(0,0,centerZ),Vector3.new(mapBounds.X,mapBounds.Y,regionDepth)
         end
+    end
+
+    -- Last resort: place the field in front of the player, beyond the hard
+    -- no-spawn radius. This is safer than ever spawning on top of the Safe Zone.
+    local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
+    if root then
+        local dir=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
+        if dir.Magnitude<.01 then dir=Vector3.new(0,0,-1) else dir=dir.Unit end
+        local clearance=safeClearanceRadius()
+        local depth=180
+        local center=root.Position+dir*(clearance+depth/2)
+        local hit=groundHitNear(center,nil)
+        if hit then center=hit.Position else center=Vector3.new(center.X,root.Position.Y-3,center.Z) end
+        return CFrame.lookAt(center,center+dir),Vector3.new(140,1,depth)
     end
 
     return mapCF,mapBounds
@@ -749,8 +916,8 @@ local function physicalLayout(count,sizeValue,baseCF,bounds,pattern,footprintX,f
     local gapZ=math.max(1.75,.9*scale)
     local naturalX=math.max(7.25,actualX+gapX)
     local naturalZ=math.max(9.0,actualZ+gapZ)
-    local usableWidth=((bounds and bounds.X) or COMPACT_SPAWN_BOUNDS.X)*.96
-    local usableDepth=((bounds and bounds.Z) or COMPACT_SPAWN_BOUNDS.Z)*.96
+    local usableWidth=((bounds and bounds.X) or COMPACT_SPAWN_BOUNDS.X)*.985
+    local usableDepth=((bounds and bounds.Z) or COMPACT_SPAWN_BOUNDS.Z)*.97
 
     local sx=naturalX
     local sz=naturalZ
@@ -771,8 +938,9 @@ local function physicalLayout(count,sizeValue,baseCF,bounds,pattern,footprintX,f
             -- fitting inside the non-safe play area wins over spilling into it.
             sz=fitZ
         else
-            -- Stretch moderately so normal batches use more of the map length.
-            sz=math.min(fitZ,naturalZ*1.25)
+            -- Use more of the playable length, but cap expansion so row gaps
+            -- remain deliberate rather than huge.
+            sz=math.min(fitZ,naturalZ*1.55)
         end
     end
 
