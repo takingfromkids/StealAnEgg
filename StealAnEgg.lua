@@ -215,7 +215,7 @@ end
 local function groundObject(o,pos,yaw)
     -- Prefer the real raycast floor, but never throw an egg away just because
     -- the game's floor has CanQuery disabled or the executor misses the raycast.
-    local hit=groundHit(pos,o)
+    local hit=groundHitNear(pos,o)
     local groundY=hit and hit.Position.Y or pos.Y
     local rot=CFrame.Angles(0,math.rad(yaw or 0),0)
 
