@@ -205,16 +205,25 @@ local function groundHit(pos,ignore)
     return workspace:Raycast(pos+Vector3.new(0,250,0),Vector3.new(0,-1000,0),rp)
 end
 local function groundObject(o,pos,yaw)
-    local hit=groundHit(pos,o); if not hit then return false end
+    -- Prefer the real raycast floor, but never throw an egg away just because
+    -- the game's floor has CanQuery disabled or the executor misses the raycast.
+    local hit=groundHit(pos,o)
+    local groundY=hit and hit.Position.Y or pos.Y
     local rot=CFrame.Angles(0,math.rad(yaw or 0),0)
-    -- First place high enough to calculate the bounding box in its final rotation.
-    pivot(o,CFrame.new(pos.X,hit.Position.Y+100,pos.Z)*rot)
-    if o:IsA("Model") then
-        local cf,sz=o:GetBoundingBox(); local bottom=cf.Position.Y-sz.Y/2; local dy=hit.Position.Y-bottom+.02; o:PivotTo(o:GetPivot()+Vector3.new(0,dy,0))
-    else
-        local bottom=o.Position.Y-o.Size.Y/2; o.CFrame=o.CFrame+Vector3.new(0,hit.Position.Y-bottom+.02,0)
-    end
-    return true
+
+    local ok=pcall(function()
+        -- Place high first so GetBoundingBox measures the final rotation cleanly.
+        pivot(o,CFrame.new(pos.X,groundY+100,pos.Z)*rot)
+        if o:IsA("Model") then
+            local cf,sz=o:GetBoundingBox()
+            local bottom=cf.Position.Y-sz.Y/2
+            o:PivotTo(o:GetPivot()+Vector3.new(0,groundY-bottom+.05,0))
+        else
+            local bottom=o.Position.Y-o.Size.Y/2
+            o.CFrame=o.CFrame+Vector3.new(0,groundY-bottom+.05,0)
+        end
+    end)
+    return ok
 end
 
 local function createAvatar(uid)
@@ -249,9 +258,10 @@ local function eggTextMatches(value,want)
     local n=norm(value)
     if n=="" then return false end
     if want[n] then return true end
+    -- Only allow the object's name to CONTAIN a configured alias.
+    -- Do not do the reverse: a generic child named "Egg" must never match every egg type.
     for alias in pairs(want) do
-        -- Accept common container suffixes/prefixes such as "NightflameEggModel".
-        if #alias>=5 and (n:find(alias,1,true) or alias:find(n,1,true)) then return true end
+        if #alias>=5 and #n>=#alias and n:find(alias,1,true) then return true end
     end
     return false
 end
@@ -357,11 +367,23 @@ local function fallbackEgg(name)
     return model
 end
 
+local function sanitizeEggClone(clone)
+    -- Keep only the visual/physical asset. Cloned game scripts or prompts can
+    -- delete/move the copy and were one reason large batches vanished.
+    for _,o in ipairs(clone:GetDescendants()) do
+        if o:IsA("Script") or o:IsA("LocalScript") or o:IsA("ModuleScript")
+            or o:IsA("ProximityPrompt") or o:IsA("ClickDetector") then
+            pcall(function() o:Destroy() end)
+        end
+    end
+end
+
 local function cloneEggVisual(source,name)
     if source then
         local ok,clone=pcall(function() return source:Clone() end)
         if ok and clone then
             clone.Name=name
+            sanitizeEggClone(clone)
             return clone,false
         end
     end
@@ -427,7 +449,10 @@ local function detectMapCenter()
         return true,MapName
     end
     MapFloor=best
-    MapCF=best.CFrame
+    local topCenter=best.CFrame:PointToWorldSpace(Vector3.new(0,best.Size.Y/2,0))
+    local forward=Vector3.new(best.CFrame.LookVector.X,0,best.CFrame.LookVector.Z)
+    if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
+    MapCF=CFrame.lookAt(topCenter,topCenter+forward)
     MapSize=best.Size
     MapName=best.Name
     updateMapMarker()
@@ -448,7 +473,13 @@ local function setMapCenterHere()
 end
 
 local function getMapFrame()
-    if MapFloor and MapFloor.Parent then MapCF=MapFloor.CFrame; MapSize=MapFloor.Size end
+    if MapFloor and MapFloor.Parent then
+        local topCenter=MapFloor.CFrame:PointToWorldSpace(Vector3.new(0,MapFloor.Size.Y/2,0))
+        local forward=Vector3.new(MapFloor.CFrame.LookVector.X,0,MapFloor.CFrame.LookVector.Z)
+        if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
+        MapCF=CFrame.lookAt(topCenter,topCenter+forward)
+        MapSize=MapFloor.Size
+    end
     if not MapCF then detectMapCenter() end
     return MapCF or CFrame.new(), MapSize or Vector3.new(140,1,220)
 end
@@ -560,51 +591,63 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     local fallbackCount=0
     local lastCols=0
     local lastRows=0
+
+    local function tryPlace(en,wanted,source,forceFallback)
+        local c,isFallback
+        if forceFallback then
+            c=fallbackEgg(en)
+            isFallback=true
+        else
+            c,isFallback=cloneEggVisual(source,en)
+        end
+        if not c then return false,false end
+
+        local ok=pcall(function()
+            c.Name=en
+            if batchTag then c:SetAttribute("SAE_Batch",batchTag) end
+            c.Parent=EggFolder
+            local scale=scaleEgg(c,size)
+            eggPhysics(c,true)
+            if not groundObject(c,wanted,0) then error("placement failed") end
+            registerEgg(c,en,scale)
+        end)
+        if not ok then
+            if c and c.Parent then pcall(function() c:Destroy() end) end
+            return false,false
+        end
+        return true,isFallback
+    end
+
     for i=1,count do
         local wanted,row,col,cols,rows=layoutPosition(i,count,size,baseCF,bounds)
-        lastCols=cols; lastRows=rows
+        lastCols=cols
+        lastRows=rows
 
         local en=name
         if name=="MIXED" then en=mixedEggFor(pattern,mix,row,col,i,cols) end
+
         if en then
             local source=findEgg(en)
-            local ok,placedFallback=pcall(function()
-                local c,isFallback=cloneEggVisual(source,en)
-                c.Name=en
-                if batchTag then c:SetAttribute("SAE_Batch",batchTag) end
-                c.Parent=EggFolder
-                local scale=scaleEgg(c,size)
-                eggPhysics(c,true)
-                if groundObject(c,wanted,0) then
-                    registerEgg(c,en,scale)
-                    made=made+1
-                    if isFallback then fallbackCount=fallbackCount+1 end
-                else
-                    c:Destroy()
-                end
-            end)
-            if not ok then
-                -- A malformed replicated asset must not cancel the entire batch.
-                local c=fallbackEgg(en)
-                c.Name=en
-                if batchTag then c:SetAttribute("SAE_Batch",batchTag) end
-                c.Parent=EggFolder
-                local scale=scaleEgg(c,size)
-                eggPhysics(c,true)
-                if groundObject(c,wanted,0) then
-                    registerEgg(c,en,scale)
-                    made=made+1
-                    fallbackCount=fallbackCount+1
-                else
-                    c:Destroy()
-                end
+            local placed,usedFallback=tryPlace(en,wanted,source,false)
+
+            -- If the game's replicated asset is malformed or cannot be positioned,
+            -- retry the SAME slot with our lightweight visual rather than losing it.
+            if not placed then
+                placed,usedFallback=tryPlace(en,wanted,nil,true)
+            end
+
+            if placed then
+                made=made+1
+                if usedFallback then fallbackCount=fallbackCount+1 end
             end
         end
-        if i%20==0 then task.wait() end
+
+        -- Yield often enough for 500-item batches without changing the requested count.
+        if i%15==0 then task.wait() end
     end
 
-    if made<=0 then
-        return false,"Egg models were resolved, but the detected floor could not accept any placements."
+    if made~=count then
+        return false,"Requested "..tostring(count).." eggs, but only "..tostring(made).." could be created.",lastCols,lastRows,fallbackCount
     end
     return true,made,lastCols,lastRows,fallbackCount
 end
@@ -1253,15 +1296,26 @@ local function sammyBatchCenter()
 end
 
 local function spawnSammyBatch(refillOnly)
-    local current=countBatch("SAMMY240")
     local target=240
-    local need=refillOnly and math.max(0,target-current) or target
     if not refillOnly then clearSpawnedEggs("SAMMY240") end
-    if need<=0 then return true,"Sammy batch is already full." end
+
     local cf=sammyBatchCenter()
-    local ok,made=spawnEggs("MIXED",need,200,"DIAGONAL SEQUENCE",cf,"SAMMY240")
-    if ok then return true,"Sammy batch: "..tostring(countBatch("SAMMY240")).." / 240 eggs." end
-    return false,tostring(made)
+    for attempt=1,3 do
+        local current=countBatch("SAMMY240")
+        local need=math.max(0,target-current)
+        if need<=0 then
+            return true,"Sammy batch: 240 / 240 eggs."
+        end
+
+        local ok,msg=spawnEggs("MIXED",need,200,"DIAGONAL SEQUENCE",cf,"SAMMY240")
+        if not ok and attempt==3 then
+            return false,"Sammy batch stopped at "..tostring(countBatch("SAMMY240")).." / 240. "..tostring(msg)
+        end
+        task.wait()
+    end
+
+    local final=countBatch("SAMMY240")
+    return final>=target, final>=target and "Sammy batch: 240 / 240 eggs." or ("Sammy batch: "..tostring(final).." / 240 eggs.")
 end
 
 local function markSammySpot()
@@ -1755,6 +1809,8 @@ spawnStatus.TextWrapped=true; spawnStatus.TextColor3=C.muted
 spawnBtn.MouseButton1Click:Connect(function()
     spawnBtn.Text="SPAWNING..."
     local en=EGGS[EggIndex]
+    -- Each click is one clean batch, so choosing 500 means exactly 500 GENERAL eggs.
+    clearSpawnedEggs("GENERAL")
     if callRemote("SpawnEggs",{Egg=en,Quantity=Amount,Size=EggSize,Pattern=Pattern,MapCenter=true}) then
         spawnStatus.Text="Server spawn request sent."
         spawnStatus.TextColor3=C.green
@@ -1762,7 +1818,7 @@ spawnBtn.MouseButton1Click:Connect(function()
         local ok,made,cols,rows,fallbacks=spawnEggs(en,Amount,EggSize,Pattern,nil,"GENERAL")
         if ok then
             local extra=(fallbacks and fallbacks>0) and (" | "..tostring(fallbacks).." local fallback visual(s)") or ""
-            spawnStatus.Text=tostring(made).." eggs - centered - "..tostring(cols).." per row / "..tostring(rows).." rows."..extra
+            spawnStatus.Text="Spawned "..tostring(made).." / "..tostring(Amount).." eggs - "..Pattern.." - "..tostring(cols).." per row / "..tostring(rows).." rows."..extra
             spawnStatus.TextColor3=C.green
             notice(P.UserId,Display,": spawned",tostring(made).." EGGS","")
         else
