@@ -554,13 +554,15 @@ local function getMapFrame()
     return MapCF or CFrame.new(), MapSize or Vector3.new(140,1,220)
 end
 
+local COMPACT_SPAWN_BOUNDS=Vector3.new(155,1,250)
+
 local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
     if preferredCF then
-        return preferredCF,Vector3.new(180,1,220)
+        return preferredCF,COMPACT_SPAWN_BOUNDS
     end
 
     -- Normal egg spawning follows the player's CURRENT position and facing.
-    -- The whole field is pushed behind the player so it never uses the Safe Zone.
+    -- The field is kept behind the player, but sized for the long/narrow map.
     local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
     if root then
         local forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
@@ -569,7 +571,6 @@ local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
         local hit=groundHitNear(root.Position,nil)
         local ground=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
 
-        -- Put the front row behind the player even with the larger row gaps.
         local amount=math.clamp(tonumber(count) or 200,1,500)
         local estimatedCols=20
         if pattern=="ONE TYPE PER ROW" or pattern=="ALTERNATING ROWS" then
@@ -579,7 +580,15 @@ local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
         end
         local estimatedRows=math.ceil(amount/estimatedCols)
         local scale=math.clamp(tonumber(sizeValue) or 100,25,500)/100
-        local estimatedRowGap=math.max(22,14+scale*8)
+
+        -- Match the compact row spacing used by physicalLayout so the field
+        -- stays close together instead of leaving large empty lanes.
+        local estimatedRowGap=math.max(7.5,5.5+scale*1.75)
+        if estimatedRows>1 then
+            estimatedRowGap=math.min(estimatedRowGap,(COMPACT_SPAWN_BOUNDS.Z*.92)/(estimatedRows-1))
+        end
+        estimatedRowGap=math.max(7,estimatedRowGap)
+
         local halfDepth=(estimatedRows-1)*estimatedRowGap/2
         local backDistance=32+halfDepth
         local center=ground-forward*backDistance
@@ -588,7 +597,7 @@ local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
         local backHit=groundHitNear(probe,nil)
         if backHit then center=backHit.Position else center=Vector3.new(center.X,ground.Y,center.Z) end
 
-        return CFrame.lookAt(center,center+forward),Vector3.new(180,1,220)
+        return CFrame.lookAt(center,center+forward),COMPACT_SPAWN_BOUNDS
     end
 
     -- Character unavailable: only then fall back to the detected map frame.
@@ -618,10 +627,22 @@ local function physicalLayout(count,sizeValue,baseCF,bounds,pattern)
     cols=math.min(cols,count)
     local rows=math.ceil(count/math.max(cols,1))
 
-    -- Intentionally generous spacing: approximately one egg-height of empty
-    -- room between rows at normal scale.
-    local sx=math.max(10,8+scale*4.5)
-    local sz=math.max(22,14+scale*8)
+    -- Compact spacing tuned to the map width in the supplied screenshot.
+    -- At 200% egg scale this is roughly 7-8 studs sideways and 9 studs row-to-row,
+    -- instead of the old ~17 / 30 stud gaps.
+    local naturalX=math.max(6.5,5.25+scale*1.5)
+    local naturalZ=math.max(7.5,5.5+scale*1.75)
+    local usableWidth=((bounds and bounds.X) or COMPACT_SPAWN_BOUNDS.X)*.90
+    local usableDepth=((bounds and bounds.Z) or COMPACT_SPAWN_BOUNDS.Z)*.92
+
+    local sx=naturalX
+    local sz=naturalZ
+    if cols>1 then sx=math.min(sx,usableWidth/(cols-1)) end
+    if rows>1 then sz=math.min(sz,usableDepth/(rows-1)) end
+
+    -- Floors stop very large batches from becoming an unreadable pile.
+    sx=math.max(5.75,sx)
+    sz=math.max(7,sz)
     return cols,rows,sx,sz
 end
 
@@ -641,26 +662,31 @@ local function mixedEggFor(pattern,mix,row,col,index,cols)
     local function at(i) return mix[(i%n)+1] end
 
     if pattern=="ORIGINAL 6x20" then
-        -- 20-wide rows built from a repeating six-type sequence.
+        -- 20 eggs across. Each row uses a six-type sequence and repeats it:
+        -- A B C D E F A B C D E F ...
         return at(row*6+(col%6))
     elseif pattern=="ONE TYPE PER ROW" then
+        -- AAAAA... / BBBBB... / CCCCC...
         return at(row)
     elseif pattern=="SPLIT ROWS 3+3" then
-        -- AAA BBB, then the next pair of types.
-        local block=math.floor(col/6)
+        -- Exactly AAA BBB AAA BBB ... across the row.
+        -- The next row advances to the next pair of egg types.
         local half=math.floor((col%6)/3)
-        return at(row*2+block*2+half)
+        return at(row*2+half)
     elseif pattern=="PAIRS 2+2+2" then
-        -- AA BB CC, then the next trio of types.
-        local block=math.floor(col/6)
+        -- Exactly AA BB CC AA BB CC ... across the row.
+        -- The next row advances to the next trio of egg types.
         local pair=math.floor((col%6)/2)
-        return at(row*3+block*3+pair)
+        return at(row*3+pair)
     elseif pattern=="MIRRORED ROWS" then
+        -- Row 1 runs left-to-right; row 2 is the exact reverse; repeat.
         local sequenceCol=(row%2==0) and col or (cols-1-col)
         return at(sequenceCol)
     elseif pattern=="ALTERNATING ROWS" then
+        -- Full rows alternate A / B / A / B ...
         return at(row%2)
     elseif pattern=="DIAGONAL SEQUENCE" then
+        -- Shift the sequence by one type on every new row.
         return at(row+col)
     end
     return at(index-1)
