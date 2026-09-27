@@ -341,30 +341,26 @@ local function availableEggs()
 end
 
 local function fallbackEgg(name)
-    local model=Instance.new("Model")
-    model.Name=name
-
+    -- One visible part per egg keeps 200-500 egg batches responsive.
     local part=Instance.new("Part")
-    part.Name="Egg"
+    part.Name=name
     part.Size=Vector3.new(2.8,3.5,2.8)
     part.Anchored=true
     part.CanCollide=false
     part.CanTouch=false
     part.CanQuery=true
+    part.CastShadow=false
     part.Material=Enum.Material.SmoothPlastic
 
     local hash=0
     for i=1,#name do hash=(hash+string.byte(name,i)*i)%360 end
-    part.Color=Color3.fromHSV(hash/360,.55,1)
+    part.Color=Color3.fromHSV(hash/360,.62,1)
 
     local mesh=Instance.new("SpecialMesh")
     mesh.MeshType=Enum.MeshType.Sphere
-    mesh.Scale=Vector3.new(1,1.25,1)
+    mesh.Scale=Vector3.new(1,1.28,1)
     mesh.Parent=part
-
-    part.Parent=model
-    model.PrimaryPart=part
-    return model
+    return part
 end
 
 local function sanitizeEggClone(clone)
@@ -509,6 +505,42 @@ local function getMapFrame()
     return MapCF or CFrame.new(), MapSize or Vector3.new(140,1,220)
 end
 
+local function visibleSpawnFrame(preferredCF)
+    local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
+    local playerPos=root and root.Position or Vector3.zero
+
+    local candidate=preferredCF
+    if not candidate then
+        candidate=select(1,getMapFrame())
+    end
+
+    -- Auto-detected "map centers" can accidentally be a distant baseplate,
+    -- lobby floor, roof or hidden map part. If it is not near the active player,
+    -- use the player's current play area so the spawned eggs are actually visible.
+    if root and candidate then
+        local delta=candidate.Position-playerPos
+        local horizontal=Vector3.new(delta.X,0,delta.Z).Magnitude
+        if horizontal>180 or math.abs(delta.Y)>70 then
+            candidate=nil
+        end
+    end
+
+    if not candidate and root then
+        local hit=groundHit(root.Position,nil)
+        local p=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
+        local forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
+        if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
+        -- Put the center a little in front of the player, not underneath them.
+        p=p+forward*28
+        local frontHit=groundHit(p,nil)
+        if frontHit then p=frontHit.Position end
+        candidate=CFrame.lookAt(p,p+forward)
+    end
+
+    if not candidate then candidate=CFrame.new(0,5,0) end
+    return candidate,Vector3.new(150,1,180)
+end
+
 local function physicalLayout(count,sizeValue,baseCF,bounds)
     local scale=math.clamp(sizeValue,25,500)/100
     local usableX=math.max(35,bounds.X*.78)
@@ -593,10 +625,29 @@ local function dropHeld()
     local r=P.Character and P.Character:FindFirstChild("HumanoidRootPart"); if not r then return end; local e=HeldEgg; HeldEgg=nil; dropEgg(e,r.Position+r.CFrame.LookVector*6,false); Carry.Visible=false
 end
 CarryDrop.MouseButton1Click:Connect(dropHeld)
-local function registerEgg(egg,name,scale)
-    local r=rootOf(egg); if not r then return end; local pr=Instance.new("ProximityPrompt"); pr.ActionText="Pick Up Egg"; pr.ObjectText=name; pr.KeyboardKeyCode=Enum.KeyCode.E; pr.HoldDuration=.05; pr.MaxActivationDistance=12; pr.RequiresLineOfSight=false; pr.Parent=r
+local function registerEgg(egg,name,scale,withPrompt)
+    local r=rootOf(egg); if not r then return end
+    local pr=nil
+    if withPrompt then
+        pr=Instance.new("ProximityPrompt")
+        pr.ActionText="Pick Up Egg"
+        pr.ObjectText=name
+        pr.KeyboardKeyCode=Enum.KeyCode.E
+        pr.HoldDuration=.05
+        pr.MaxActivationDistance=12
+        pr.RequiresLineOfSight=false
+        pr.Parent=r
+        pr.Triggered:Connect(function()
+            if HeldEgg then return end
+            local cr=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
+            if cr and carryEgg(egg,cr,"PLAYER",P.Character) then
+                HeldEgg=egg
+                CarryName.Text="CARRYING: "..name
+                Carry.Visible=true
+            end
+        end)
+    end
     EggState[egg]={name=name,scale=scale,prompt=pr,carried=false,delivered=false,claim=nil}
-    pr.Triggered:Connect(function() if HeldEgg then return end; local cr=P.Character and P.Character:FindFirstChild("HumanoidRootPart"); if cr and carryEgg(egg,cr,"PLAYER",P.Character) then HeldEgg=egg; CarryName.Text="CARRYING: "..name; Carry.Visible=true end end)
 end
 local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     local mix=nil
@@ -606,42 +657,18 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     size=math.clamp(tonumber(size) or 100,25,500)
     pattern=pattern or PATTERNS[1]
 
-    local baseCF,bounds=getMapFrame()
-    if customCF then
-        baseCF=customCF
-        bounds=Vector3.new(110,1,150)
-    end
-
+    local baseCF,bounds=visibleSpawnFrame(customCF)
     local made=0
-    local fallbackCount=0
     local lastCols=0
     local lastRows=0
+    local usePrompts=count<=80
 
-    local function tryPlace(en,wanted,source,forceFallback)
-        local c,isFallback
-        if forceFallback then
-            c=fallbackEgg(en)
-            isFallback=true
-        else
-            c,isFallback=cloneEggVisual(source,en)
-        end
-        if not c then return false,false end
-
-        local ok=pcall(function()
-            c.Name=en
-            if batchTag then c:SetAttribute("SAE_Batch",batchTag) end
-            c.Parent=EggFolder
-            local scale=scaleEgg(c,size)
-            eggPhysics(c,true)
-            if not groundObject(c,wanted,0) then error("placement failed") end
-            registerEgg(c,en,scale)
-        end)
-        if not ok then
-            if c and c.Parent then pcall(function() c:Destroy() end) end
-            return false,false
-        end
-        return true,isFallback
-    end
+    -- Use one ground height for the whole batch. Hundreds of raycasts and
+    -- hundreds of cloned game models were causing the freezes.
+    local centerHit=groundHit(baseCF.Position,nil)
+    local baseY=centerHit and centerHit.Position.Y or baseCF.Position.Y
+    baseCF=CFrame.new(baseCF.Position.X,baseY,baseCF.Position.Z)
+        * CFrame.Angles(0,math.atan2(-baseCF.LookVector.X,-baseCF.LookVector.Z),0)
 
     for i=1,count do
         local wanted,row,col,cols,rows=layoutPosition(i,count,size,baseCF,bounds)
@@ -650,31 +677,26 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
 
         local en=name
         if name=="MIXED" then en=mixedEggFor(pattern,mix,row,col,i,cols) end
+        en=en or "Egg"
 
-        if en then
-            local source=findEgg(en)
-            local placed,usedFallback=tryPlace(en,wanted,source,false)
+        local egg=fallbackEgg(en)
+        egg.Name=en
+        if batchTag then egg:SetAttribute("SAE_Batch",batchTag) end
+        egg.Parent=EggFolder
 
-            -- If the game's replicated asset is malformed or cannot be positioned,
-            -- retry the SAME slot with our lightweight visual rather than losing it.
-            if not placed then
-                placed,usedFallback=tryPlace(en,wanted,nil,true)
-            end
+        local scale=scaleEgg(egg,size)
+        eggPhysics(egg,true)
 
-            if placed then
-                made=made+1
-                if usedFallback then fallbackCount=fallbackCount+1 end
-            end
-        end
+        -- Direct placement: these are single-part eggs, so no bounding-box scan is needed.
+        local half=egg.Size.Y/2
+        egg.CFrame=CFrame.new(wanted.X,baseY+half+.08,wanted.Z)
+        registerEgg(egg,en,scale,usePrompts)
+        made=made+1
 
-        -- Yield often enough for 500-item batches without changing the requested count.
-        if i%15==0 then task.wait() end
+        if i%40==0 then task.wait() end
     end
 
-    if made~=count then
-        return false,"Requested "..tostring(count).." eggs, but only "..tostring(made).." could be created.",lastCols,lastRows,fallbackCount
-    end
-    return true,made,lastCols,lastRows,fallbackCount
+    return true,made,lastCols,lastRows,count
 end
 
 local function clearSpawnedEggs(batchTag)
@@ -1315,9 +1337,16 @@ local function spawnSammy()
 end
 
 local function sammyBatchCenter()
-    if SammySpot then return SammySpot end
-    local cf=getMapFrame()
-    return cf
+    if SammySpot then return select(1,visibleSpawnFrame(SammySpot)) end
+    if Sammy and Sammy.Parent then
+        local r=Sammy:FindFirstChild("HumanoidRootPart")
+        if r then
+            local hit=groundHit(r.Position,Sammy)
+            local p=hit and hit.Position or r.Position
+            return select(1,visibleSpawnFrame(CFrame.new(p)))
+        end
+    end
+    return select(1,visibleSpawnFrame(nil))
 end
 
 local function spawnSammyBatch(refillOnly)
@@ -1830,7 +1859,7 @@ local sizeValue=function() return EggSize end
 sizeValue=intSlider(EggsPage,217,25,500,5,100,"Egg scale",function(v) EggSize=v end)
 local spawnBtn=button(EggsPage,"Spawn eggs in MAP CENTER",UDim2.fromOffset(4,275),UDim2.new(1,-8,0,38),false)
 local clearEggBtn=button(EggsPage,"Clear spawned eggs",UDim2.fromOffset(4,320),UDim2.new(1,-8,0,34),true)
-local spawnStatus=label(EggsPage,"Map center is used regardless of where you stand.",UDim2.fromOffset(5,361),UDim2.new(1,-10,0,42),9)
+local spawnStatus=label(EggsPage,"Spawns at the detected map center when valid; otherwise near your active play area.",UDim2.fromOffset(5,361),UDim2.new(1,-10,0,42),9)
 spawnStatus.TextWrapped=true; spawnStatus.TextColor3=C.muted
 spawnBtn.MouseButton1Click:Connect(function()
     spawnBtn.Text="SPAWNING..."
@@ -1843,8 +1872,7 @@ spawnBtn.MouseButton1Click:Connect(function()
     else
         local ok,made,cols,rows,fallbacks=spawnEggs(en,Amount,EggSize,Pattern,nil,"GENERAL")
         if ok then
-            local extra=(fallbacks and fallbacks>0) and (" | "..tostring(fallbacks).." local fallback visual(s)") or ""
-            spawnStatus.Text="Spawned "..tostring(made).." / "..tostring(Amount).." eggs - "..Pattern.." - "..tostring(cols).." per row / "..tostring(rows).." rows."..extra
+            spawnStatus.Text="Spawned "..tostring(made).." / "..tostring(Amount).." visible eggs - "..Pattern.." - "..tostring(cols).." per row / "..tostring(rows).." rows."
             spawnStatus.TextColor3=C.green
             notice(P.UserId,Display,": spawned",tostring(made).." EGGS","")
         else
