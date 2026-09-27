@@ -467,26 +467,57 @@ local function floorCandidateScore(o)
 end
 
 local function detectMapCenter()
+    local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
+    local playerPos=root and root.Position or Vector3.zero
+    local nearHit=root and groundHitNear(root.Position,nil) or nil
+    local playY=nearHit and nearHit.Position.Y or playerPos.Y
+
     local best=nil
-    local bestScore=-1
-    for _,o in ipairs(workspace:GetDescendants()) do
-        if o:IsA("BasePart") and not o:IsDescendantOf(EggFolder) and not o:IsDescendantOf(NPCFolder) then
-            local s=floorCandidateScore(o)
-            if s>bestScore then bestScore=s; best=o end
+    local bestScore=-math.huge
+
+    -- If the part directly beneath the player is a large floor, its geometric
+    -- centre is the most reliable map centre and is independent of where the
+    -- player is standing on that floor.
+    if nearHit and nearHit.Instance and nearHit.Instance:IsA("BasePart") then
+        local under=nearHit.Instance
+        if under.Size.X>=55 and under.Size.Z>=55 and under.Anchored then
+            best=under
+            bestScore=1e12
         end
     end
+
     if not best then
-        local r=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
-        if not r then return false,"Map floor could not be detected." end
-        local hit=groundHit(r.Position,nil)
-        local pos=hit and hit.Position or r.Position
+        for _,o in ipairs(workspace:GetDescendants()) do
+            if o:IsA("BasePart") and not o:IsDescendantOf(EggFolder) and not o:IsDescendantOf(NPCFolder) then
+                local base=floorCandidateScore(o)
+                if base>=0 then
+                    local topY=o.CFrame:PointToWorldSpace(Vector3.new(0,o.Size.Y/2,0)).Y
+                    local vertical=math.abs(topY-playY)
+                    if vertical<=18 then
+                        local horizontal=Vector3.new(o.Position.X-playerPos.X,0,o.Position.Z-playerPos.Z).Magnitude
+                        -- Strongly favour large floor pieces at the same gameplay height,
+                        -- while rejecting distant lobby/baseplate candidates.
+                        local score=base-(vertical*800)-(math.max(0,horizontal-260)*80)
+                        if horizontal<=520 and score>bestScore then
+                            bestScore=score
+                            best=o
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if not best then
+        local pos=nearHit and nearHit.Position or (root and root.Position or Vector3.zero)
         MapFloor=nil
         MapCF=CFrame.new(pos)
-        MapSize=Vector3.new(140,1,220)
+        MapSize=Vector3.new(180,1,220)
         MapName="Fallback center"
         updateMapMarker()
         return true,MapName
     end
+
     MapFloor=best
     local topCenter=best.CFrame:PointToWorldSpace(Vector3.new(0,best.Size.Y/2,0))
     local forward=Vector3.new(best.CFrame.LookVector.X,0,best.CFrame.LookVector.Z)
@@ -524,63 +555,41 @@ local function getMapFrame()
 end
 
 local function visibleSpawnFrame(preferredCF)
-    local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
-
-    -- An explicitly supplied Sammy/marked position is trusted.
     if preferredCF then
         return preferredCF,Vector3.new(180,1,220)
     end
 
-    -- A center chosen by the user in Settings is also trusted.
-    if MapCF and MapName=="Manual map center" then
-        return MapCF,Vector3.new(180,1,220)
+    -- Normal egg spawning is ALWAYS tied to the map centre, never LocalPlayer.
+    local cf,bounds=getMapFrame()
+    if MapName=="Fallback center" then
+        -- Retry once in case the map finished loading after the UI.
+        detectMapCenter()
+        cf,bounds=getMapFrame()
     end
-
-    -- Otherwise always use the player's current active area. Automatic floor
-    -- detection is kept for Settings/debugging, but it no longer decides where
-    -- a huge egg batch appears.
-    if root then
-        local hit=groundHitNear(root.Position,nil)
-        local ground=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
-        local forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
-        if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
-
-        local center=ground+forward*75
-        local probe=Vector3.new(center.X,root.Position.Y,center.Z)
-        local frontHit=groundHitNear(probe,nil)
-        if frontHit then
-            center=frontHit.Position
-        else
-            center=Vector3.new(center.X,ground.Y,center.Z)
-        end
-        return CFrame.lookAt(center,center+forward),Vector3.new(180,1,220)
-    end
-
-    return CFrame.new(0,5,0),Vector3.new(180,1,220)
+    return cf,bounds
 end
 
 local function physicalLayout(count,sizeValue,baseCF,bounds)
     local scale=math.clamp(sizeValue,25,500)/100
-    local usableX=math.max(35,bounds.X*.78)
-    local usableZ=math.max(45,bounds.Z*.72)
-    local desiredX=math.max(6,5+scale*3.8)
-    local desiredZ=math.max(7,6+scale*4.2)
-    local maxCols=math.max(6,math.floor(usableX/desiredX))
-    maxCols=math.min(20,maxCols)
-    local maxRows=math.max(1,math.floor(usableZ/desiredZ))
-    local cols=math.min(count,maxCols)
-    local neededRows=math.ceil(count/cols)
-    if neededRows>maxRows then
-        local neededCols=math.ceil(count/maxRows)
-        cols=math.min(24,math.max(cols,neededCols))
-        neededRows=math.ceil(count/cols)
-    end
-    local rows=neededRows
-    local spaceX=math.min(desiredX,usableX/math.max(cols,1))
-    local spaceZ=math.min(desiredZ,usableZ/math.max(rows,1))
-    spaceX=math.max(4.5,spaceX)
-    spaceZ=math.max(4.8,spaceZ)
-    return cols,rows,spaceX,spaceZ
+    local usableX=math.max(70,bounds.X*.84)
+    local usableZ=math.max(90,bounds.Z*.82)
+
+    -- A wider, more rectangular grid gives each row visible separation.
+    local aspect=math.max(.65,math.min(1.7,usableX/usableZ))
+    local cols=math.ceil(math.sqrt(count*aspect))
+    cols=math.clamp(cols,10,28)
+    local rows=math.ceil(count/cols)
+
+    -- Prefer visibly separated rows. If the requested quantity is too large for
+    -- the map, compress only as much as necessary rather than bundling everything.
+    local desiredX=math.max(8,6.5+scale*4.5)
+    local desiredZ=math.max(10,8+scale*5.5)
+    local sx=math.min(desiredX,usableX/math.max(cols,1))
+    local sz=math.min(desiredZ,usableZ/math.max(rows,1))
+
+    sx=math.max(5.5,sx)
+    sz=math.max(7.5,sz)
+    return cols,rows,sx,sz
 end
 
 local function layoutPosition(index,count,sizeValue,baseCF,bounds)
@@ -1521,10 +1530,29 @@ local function fallbackBot(i)
 end
 local function botAvatar(i,pool) local uid=pool[i]; if uid then local ok,m=pcall(function() return createAvatar(uid) end); if ok and m then return m end end; return fallbackBot(i) end
 local function botTag(m,id,trailName,stat)
-    local head=m:FindFirstChild("Head"); if not head then return end; local g=Instance.new("BillboardGui"); g.Size=UDim2.fromOffset(270,65); g.StudsOffset=Vector3.new(0,3.5,0); g.AlwaysOnTop=true; g.Parent=head
-    local a=label(g,id[1],UDim2.new(),UDim2.new(1,0,0,26),21); a.TextXAlignment=Enum.TextXAlignment.Center; a.Font=Enum.Font.GothamBold; a.TextStrokeTransparency=0
-    local b=label(g,"@"..id[2],UDim2.fromOffset(0,27),UDim2.new(1,0,0,18),14); b.TextXAlignment=Enum.TextXAlignment.Center; b.TextColor3=Color3.fromRGB(220,220,225)
-    local c=label(g,trailName.." - "..math.floor(stat/1000000).."M",UDim2.fromOffset(0,46),UDim2.new(1,0,0,15),10); c.TextXAlignment=Enum.TextXAlignment.Center; c.TextColor3=C.muted
+    local head=m:FindFirstChild("Head")
+    if not head then return end
+
+    local g=Instance.new("BillboardGui")
+    g.Name="SAE_BotTag"
+    g.Size=UDim2.fromOffset(220,46)
+    g.StudsOffset=Vector3.new(0,3.25,0)
+    g.AlwaysOnTop=true
+    g.MaxDistance=70
+    g.Parent=head
+
+    local a=label(g,id[1],UDim2.fromOffset(0,0),UDim2.new(1,0,0,23),17)
+    a.TextXAlignment=Enum.TextXAlignment.Center
+    a.Font=Enum.Font.GothamMedium
+    a.TextStrokeTransparency=.55
+    a.TextStrokeColor3=Color3.new(0,0,0)
+
+    local b=label(g,"@"..id[2],UDim2.fromOffset(0,23),UDim2.new(1,0,0,18),13)
+    b.TextXAlignment=Enum.TextXAlignment.Center
+    b.Font=Enum.Font.Gotham
+    b.TextColor3=Color3.fromRGB(205,205,210)
+    b.TextStrokeTransparency=.72
+    b.TextStrokeColor3=Color3.new(0,0,0)
 end
 local CollectorsEnabled=false
 
@@ -1657,11 +1685,64 @@ local function botBrain(d)
 end
 
 local function spawnBots(n)
-    if not safePosition() then detectSafe() end; if not safePosition() then return false,"Lock the safe zone first." end; clearBots(); CollectorsEnabled=true; n=math.clamp(n,1,10); local pr=P.Character and P.Character:FindFirstChild("HumanoidRootPart"); if not pr then return false,"Character unavailable." end; local pool=botPool()
+    if not safePosition() then detectSafe() end
+    local safe=safePosition()
+    if not safe then return false,"Lock the safe zone first." end
+
+    clearBots()
+    CollectorsEnabled=true
+    n=math.clamp(n,1,10)
+    local pool=botPool()
+
+    local eggTarget=nil
+    local nearest=nearestEgg(safe,"BOT_SPAWN_LOOK")
+    local er=nearest and rootOf(nearest) or nil
+    if er then eggTarget=er.Position end
+    if not eggTarget then eggTarget=select(1,getMapFrame()).Position end
+
+    local dir=Vector3.new(eggTarget.X-safe.X,0,eggTarget.Z-safe.Z)
+    if dir.Magnitude<.1 then dir=Vector3.new(0,0,-1) else dir=dir.Unit end
+    local right=Vector3.new(-dir.Z,0,dir.X)
+
     for i=1,n do
-        local ok,m=pcall(function() return botAvatar(i,pool) end); if ok and m then m.Name="Egg Bot "..i; m.Parent=NPCFolder; local h=m:FindFirstChildOfClass("Humanoid"); local r=m:FindFirstChild("HumanoidRootPart"); if h and r then h.DisplayDistanceType=Enum.HumanoidDisplayDistanceType.None; h.NameDisplayDistance=0; h.HealthDisplayDistance=0; h.AutoRotate=true; r.Anchored=false; local id=BOT_NAMES[((i-1)%arrlen(BOT_NAMES))+1]; local tr=TRAILS[math.random(1,arrlen(TRAILS))]; local stat=math.random(200,270)*1000000; local speed=90+((stat-200000000)/70000000)*35; placeNPC(m,pr.Position-pr.CFrame.LookVector*(5+math.ceil(i/2))+pr.CFrame.RightVector*((i%2==0) and 5 or -5),pr.CFrame.LookVector); local trail=addTrail(m,tr); local d={model=m,key="BOT_"..i.."_"..id[2],speed=speed,trail=trail,anim=animations(h)}; botTag(m,id,tr[1],stat); table.insert(Bots,d); botBrain(d) else m:Destroy() end end; task.wait(.04)
+        local ok,m=pcall(function() return botAvatar(i,pool) end)
+        if ok and m then
+            m.Name="Egg Bot "..i
+            m.Parent=NPCFolder
+            local h=m:FindFirstChildOfClass("Humanoid")
+            local r=m:FindFirstChild("HumanoidRootPart")
+            if h and r then
+                h.DisplayDistanceType=Enum.HumanoidDisplayDistanceType.None
+                h.NameDisplayDistance=0
+                h.HealthDisplayDistance=0
+                h.AutoRotate=true
+                r.Anchored=false
+
+                local id=BOT_NAMES[((i-1)%arrlen(BOT_NAMES))+1]
+                local tr=TRAILS[math.random(1,arrlen(TRAILS))]
+                local stat=math.random(200,270)*1000000
+                local speed=90+((stat-200000000)/70000000)*35
+
+                -- Spawn in a small formation INSIDE the safe zone.
+                local row=math.floor((i-1)/4)
+                local col=(i-1)%4
+                local lateral=(col-1.5)*3.4
+                local backward=row*3.2
+                local spawnPos=safe+right*lateral-dir*backward
+                placeNPC(m,spawnPos,dir)
+
+                local trail=addTrail(m,tr)
+                local d={model=m,key="BOT_"..i.."_"..id[2],speed=speed,trail=trail,anim=animations(h)}
+                botTag(m,id,tr[1],stat)
+                table.insert(Bots,d)
+                botBrain(d)
+            else
+                m:Destroy()
+            end
+        end
+        task.wait(.04)
     end
-    return true,tostring(arrlen(Bots)).." bots spawned - Safe Zone: "..SafeName
+    return true,tostring(arrlen(Bots)).." bots spawned from Safe Zone: "..SafeName
 end
 
 -- Reference-script style boost/event controls. Without a configured legitimate server remote,
@@ -1940,7 +2021,7 @@ local sizeValue=function() return EggSize end
 sizeValue=intSlider(EggsPage,217,25,500,5,100,"Egg scale",function(v) EggSize=v end)
 local spawnBtn=button(EggsPage,"Spawn eggs in MAP CENTER",UDim2.fromOffset(4,275),UDim2.new(1,-8,0,38),false)
 local clearEggBtn=button(EggsPage,"Clear spawned eggs",UDim2.fromOffset(4,320),UDim2.new(1,-8,0,34),true)
-local spawnStatus=label(EggsPage,"Spawns at the detected map center when valid; otherwise near your active play area.",UDim2.fromOffset(5,361),UDim2.new(1,-10,0,42),9)
+local spawnStatus=label(EggsPage,"Always spawns from the detected middle of the map, regardless of where you stand.",UDim2.fromOffset(5,361),UDim2.new(1,-10,0,42),9)
 spawnStatus.TextWrapped=true; spawnStatus.TextColor3=C.muted
 spawnBtn.MouseButton1Click:Connect(function()
     spawnBtn.Text="SPAWNING..."
