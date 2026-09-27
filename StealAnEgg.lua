@@ -507,38 +507,33 @@ end
 
 local function visibleSpawnFrame(preferredCF)
     local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
-    local playerPos=root and root.Position or Vector3.zero
 
-    local candidate=preferredCF
-    if not candidate then
-        candidate=select(1,getMapFrame())
+    -- An explicitly supplied Sammy/marked position is trusted.
+    if preferredCF then
+        return preferredCF,Vector3.new(180,1,220)
     end
 
-    -- Auto-detected "map centers" can accidentally be a distant baseplate,
-    -- lobby floor, roof or hidden map part. If it is not near the active player,
-    -- use the player's current play area so the spawned eggs are actually visible.
-    if root and candidate then
-        local delta=candidate.Position-playerPos
-        local horizontal=Vector3.new(delta.X,0,delta.Z).Magnitude
-        if horizontal>180 or math.abs(delta.Y)>70 then
-            candidate=nil
-        end
+    -- A center chosen by the user in Settings is also trusted.
+    if MapCF and MapName=="Manual map center" then
+        return MapCF,Vector3.new(180,1,220)
     end
 
-    if not candidate and root then
+    -- Otherwise always use the player's current active area. Automatic floor
+    -- detection is kept for Settings/debugging, but it no longer decides where
+    -- a huge egg batch appears.
+    if root then
         local hit=groundHit(root.Position,nil)
-        local p=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
+        local ground=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
         local forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
         if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
-        -- Put the center a little in front of the player, not underneath them.
-        p=p+forward*28
-        local frontHit=groundHit(p,nil)
-        if frontHit then p=frontHit.Position end
-        candidate=CFrame.lookAt(p,p+forward)
+
+        local center=ground+forward*75
+        local frontHit=groundHit(center,nil)
+        if frontHit then center=frontHit.Position end
+        return CFrame.lookAt(center,center+forward),Vector3.new(180,1,220)
     end
 
-    if not candidate then candidate=CFrame.new(0,5,0) end
-    return candidate,Vector3.new(150,1,180)
+    return CFrame.new(0,5,0),Vector3.new(180,1,220)
 end
 
 local function physicalLayout(count,sizeValue,baseCF,bounds)
