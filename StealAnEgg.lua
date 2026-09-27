@@ -429,7 +429,14 @@ local function availableEggs()
     return a
 end
 
--- Map-center detection. General egg spawning is anchored to this map frame, never the player.
+-- Safe-zone state is declared before map/layout code so GENERAL egg spawning
+-- can always reserve a no-spawn band around the Safe Zone.
+local SafeObj=nil
+local SafePos=nil
+local SafeName="Not locked"
+local Marker=nil
+
+-- Map-center detection. General egg spawning is anchored to the map frame.
 local MapFloor=nil
 local MapCF=nil
 local MapSize=nil
@@ -454,6 +461,19 @@ local function updateMapMarker()
     MapMarker=m
 end
 
+local function reservedZoneName(value)
+    local n=norm(value)
+    return n:find("safezone",1,true)
+        or n:find("eggdropoff",1,true)
+        or n:find("deposit",1,true)
+        or n:find("playerspawn",1,true)
+        or n:find("spawnzone",1,true)
+        or n:find("lobby",1,true)
+        or n:find("playerbase",1,true)
+        or n:find("homebase",1,true)
+        or n:find("plot",1,true)
+end
+
 local function floorCandidateScore(o)
     if not o:IsA("BasePart") or not o.Anchored or not o.CanCollide or o.Transparency>=.98 then return -1 end
     local s=o.Size
@@ -463,6 +483,9 @@ local function floorCandidateScore(o)
     local n=norm(o.Name)
     if n:find("floor",1,true) or n:find("ground",1,true) or n:find("arena",1,true) or n:find("map",1,true) then score=score*1.8 end
     if n:find("wall",1,true) or n:find("roof",1,true) or n:find("ceiling",1,true) then score=score*.08 end
+    -- Safe/spawn/base pieces can be large floors too. They are valid ground,
+    -- but they must not win map detection over the actual arena.
+    if reservedZoneName(n) then score=score*.08 end
     return score
 end
 
@@ -474,34 +497,30 @@ local function detectMapCenter()
 
     local best=nil
     local bestScore=-math.huge
+    local under=(nearHit and nearHit.Instance and nearHit.Instance:IsA("BasePart")) and nearHit.Instance or nil
 
-    -- If the part directly beneath the player is a large floor, its geometric
-    -- centre is the most reliable map centre and is independent of where the
-    -- player is standing on that floor.
-    if nearHit and nearHit.Instance and nearHit.Instance:IsA("BasePart") then
-        local under=nearHit.Instance
-        if under.Size.X>=55 and under.Size.Z>=55 and under.Anchored then
-            best=under
-            bestScore=1e12
-        end
-    end
+    -- Scan every plausible floor. The old version gave the part directly under
+    -- the player an unbeatable score, which meant standing in the Safe Zone
+    -- could make the Safe Zone itself become "the map".
+    for _,o in ipairs(workspace:GetDescendants()) do
+        if o:IsA("BasePart") and not o:IsDescendantOf(EggFolder) and not o:IsDescendantOf(NPCFolder) then
+            local base=floorCandidateScore(o)
+            if base>=0 then
+                local topY=o.CFrame:PointToWorldSpace(Vector3.new(0,o.Size.Y/2,0)).Y
+                local vertical=math.abs(topY-playY)
+                if vertical<=18 then
+                    local horizontal=Vector3.new(o.Position.X-playerPos.X,0,o.Position.Z-playerPos.Z).Magnitude
+                    local score=base-(vertical*800)-(math.max(0,horizontal-300)*65)
 
-    if not best then
-        for _,o in ipairs(workspace:GetDescendants()) do
-            if o:IsA("BasePart") and not o:IsDescendantOf(EggFolder) and not o:IsDescendantOf(NPCFolder) then
-                local base=floorCandidateScore(o)
-                if base>=0 then
-                    local topY=o.CFrame:PointToWorldSpace(Vector3.new(0,o.Size.Y/2,0)).Y
-                    local vertical=math.abs(topY-playY)
-                    if vertical<=18 then
-                        local horizontal=Vector3.new(o.Position.X-playerPos.X,0,o.Position.Z-playerPos.Z).Magnitude
-                        -- Strongly favour large floor pieces at the same gameplay height,
-                        -- while rejecting distant lobby/baseplate candidates.
-                        local score=base-(vertical*800)-(math.max(0,horizontal-260)*80)
-                        if horizontal<=520 and score>bestScore then
-                            bestScore=score
-                            best=o
-                        end
+                    -- A normal arena floor beneath the player gets only a small
+                    -- bonus. A Safe/Spawn/Plot floor beneath the player gets none.
+                    if o==under and not reservedZoneName(o.Name) then
+                        score=score*1.18
+                    end
+
+                    if horizontal<=600 and score>bestScore then
+                        bestScore=score
+                        best=o
                     end
                 end
             end
@@ -512,7 +531,7 @@ local function detectMapCenter()
         local pos=nearHit and nearHit.Position or (root and root.Position or Vector3.zero)
         MapFloor=nil
         MapCF=CFrame.new(pos)
-        MapSize=Vector3.new(180,1,220)
+        MapSize=Vector3.new(155,1,250)
         MapName="Fallback center"
         updateMapMarker()
         return true,MapName
@@ -592,30 +611,87 @@ end
 
 local COMPACT_SPAWN_BOUNDS=Vector3.new(155,1,250)
 
+local function spawnAvoidAnchor(mapCF,mapBounds)
+    -- Prefer the explicitly detected/marked Safe Zone.
+    local anchor=nil
+    local clearance=42
+
+    if SafeObj and SafeObj.Parent then
+        if SafeObj:IsA("BasePart") then
+            anchor=SafeObj.Position
+            clearance=math.clamp(math.max(SafeObj.Size.X,SafeObj.Size.Z)*.5+14,34,62)
+        elseif SafeObj:IsA("Model") then
+            anchor=SafeObj:GetPivot().Position
+            local ok,_,sz=pcall(function() return SafeObj:GetBoundingBox() end)
+            if ok and sz then
+                clearance=math.clamp(math.max(sz.X,sz.Z)*.5+14,34,62)
+            end
+        end
+    end
+    if not anchor and SafePos then
+        anchor=SafePos
+        clearance=42
+    end
+    if anchor then return anchor,clearance end
+
+    -- Before the Safe Zone is manually locked, the player is a useful fallback
+    -- only when they are near an end of the long arena (where the Safe Zone is).
+    local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
+    if root and mapCF and mapBounds then
+        local lp=mapCF:PointToObjectSpace(root.Position)
+        local nearEnd=math.abs(lp.Z)>=math.max(28,mapBounds.Z*.24)
+        local hit=groundHitNear(root.Position,nil)
+        local onReserved=hit and hit.Instance and reservedZoneName(hit.Instance.Name)
+        if nearEnd or onReserved then
+            return root.Position,42
+        end
+    end
+    return nil,nil
+end
+
 local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
     if preferredCF then
         return preferredCF,COMPACT_SPAWN_BOUNDS
     end
 
-    -- Use the detected map floor whenever possible. This fixes angled/wonky
-    -- rows caused by using the player's current facing and keeps equal margins
-    -- at both ends of the usable map.
     local mapCF,mapBounds=getMapFrame()
-    if mapCF then
-        return mapCF,mapBounds
+    if not mapCF then return CFrame.new(),COMPACT_SPAWN_BOUNDS end
+    mapBounds=mapBounds or COMPACT_SPAWN_BOUNDS
+
+    -- Reserve a full-width no-spawn band around the Safe Zone and use the
+    -- longer remaining side of the arena. This guarantees GENERAL eggs are
+    -- shifted AWAY from the Safe Zone instead of merely centred on the map.
+    local anchor,clearance=spawnAvoidAnchor(mapCF,mapBounds)
+    if anchor then
+        local scale=math.clamp(tonumber(sizeValue) or 100,25,500)/100
+        local edgeMargin=math.max(6,4+scale*1.5)
+        local minZ=-mapBounds.Z/2+edgeMargin
+        local maxZ= mapBounds.Z/2-edgeMargin
+        local localAnchor=mapCF:PointToObjectSpace(anchor)
+        local exMin=localAnchor.Z-clearance
+        local exMax=localAnchor.Z+clearance
+
+        local leftA=minZ
+        local leftB=math.min(maxZ,exMin)
+        local rightA=math.max(minZ,exMax)
+        local rightB=maxZ
+        local leftLen=math.max(0,leftB-leftA)
+        local rightLen=math.max(0,rightB-rightA)
+
+        local a,b
+        if leftLen>=rightLen then a,b=leftA,leftB else a,b=rightA,rightB end
+
+        -- Only crop the arena when the reserved band actually leaves a useful
+        -- play area. Otherwise keep the detected map bounds as a safe fallback.
+        if a and b and (b-a)>=55 then
+            local centerZ=(a+b)/2
+            local regionDepth=b-a
+            local shifted=mapCF*CFrame.new(0,0,centerZ)
+            return shifted,Vector3.new(mapBounds.X,mapBounds.Y,regionDepth)
+        end
     end
 
-    -- Last-resort fallback if the map cannot be detected.
-    local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
-    if root then
-        local forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
-        if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
-        local hit=groundHitNear(root.Position,nil)
-        local ground=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
-        return CFrame.lookAt(ground,ground+forward),COMPACT_SPAWN_BOUNDS
-    end
-
-    return CFrame.new(),COMPACT_SPAWN_BOUNDS
+    return mapCF,mapBounds
 end
 
 local function physicalLayout(count,sizeValue,baseCF,bounds,pattern)
@@ -641,27 +717,39 @@ local function physicalLayout(count,sizeValue,baseCF,bounds,pattern)
     cols=math.min(cols,count)
     local rows=math.ceil(count/math.max(cols,1))
 
-    -- Leave a VISIBLE but still compact gap between neighbouring eggs and
-    -- between rows. The old compact values could make 200% eggs look joined.
+    -- Small, clearly visible gaps. The grid can expand a little to use more of
+    -- the available arena length, but it will NEVER expand beyond a modest gap.
     local naturalX=math.max(8.0,6.0+scale*2.15)
     local naturalZ=math.max(10.0,7.0+scale*2.75)
-
-    -- Use almost all of the detected floor instead of leaving a large border.
-    -- We only compress when a batch physically needs more room than the map has.
     local usableWidth=((bounds and bounds.X) or COMPACT_SPAWN_BOUNDS.X)*.96
     local usableDepth=((bounds and bounds.Z) or COMPACT_SPAWN_BOUNDS.Z)*.96
 
     local sx=naturalX
     local sz=naturalZ
-    if cols>1 then sx=math.min(sx,usableWidth/(cols-1)) end
-    if rows>1 then sz=math.min(sz,usableDepth/(rows-1)) end
 
-    -- Never collapse rows completely together.
-    sx=math.max(6.75,sx)
-    sz=math.max(8.75,sz)
+    if cols>1 then
+        local fitX=usableWidth/(cols-1)
+        if fitX<naturalX then
+            sx=fitX
+        else
+            sx=math.min(fitX,naturalX*1.12)
+        end
+    end
+
+    if rows>1 then
+        local fitZ=usableDepth/(rows-1)
+        if fitZ<naturalZ then
+            -- If a very large batch physically cannot keep the ideal gap,
+            -- fitting inside the non-safe play area wins over spilling into it.
+            sz=fitZ
+        else
+            -- Stretch moderately so normal batches use more of the map length.
+            sz=math.min(fitZ,naturalZ*1.25)
+        end
+    end
+
     return cols,rows,sx,sz
 end
-
 local function layoutPosition(index,count,sizeValue,baseCF,bounds,pattern)
     local cols,rows,sx,sz=physicalLayout(count,sizeValue,baseCF,bounds,pattern)
     local row=math.floor((index-1)/cols)
@@ -1623,8 +1711,8 @@ task.spawn(function()
     end
 end)
 
--- Safe zone and bots.
-local SafeObj=nil; local SafePos=nil; local SafeName="Not locked"; local Marker=nil
+-- Safe zone and bots. State was declared before the map/layout code so egg
+-- spawning can reserve this area before collectors are started.
 local function objPos(o) if not o then return nil end; if o:IsA("BasePart") then return o.Position elseif o:IsA("Model") then return o:GetPivot().Position end end
 local function safePosition() if SafeObj and SafeObj.Parent then local p=objPos(SafeObj); if p then local hit=groundHitNear(p,nil); SafePos=hit and hit.Position or p end end; return SafePos end
 local function marker()
