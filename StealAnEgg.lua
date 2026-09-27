@@ -519,11 +519,31 @@ local function detectMapCenter()
     end
 
     MapFloor=best
+
+    -- Align the spawn grid to the floor itself, not to the player's camera/facing.
+    -- The LONGER floor axis is always treated as the row/depth direction. This
+    -- keeps rows ruler-straight even if the player is standing at an angle.
     local topCenter=best.CFrame:PointToWorldSpace(Vector3.new(0,best.Size.Y/2,0))
-    local forward=Vector3.new(best.CFrame.LookVector.X,0,best.CFrame.LookVector.Z)
-    if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
+    local look=Vector3.new(best.CFrame.LookVector.X,0,best.CFrame.LookVector.Z)
+    local right=Vector3.new(best.CFrame.RightVector.X,0,best.CFrame.RightVector.Z)
+    if look.Magnitude<.01 then look=Vector3.new(0,0,-1) else look=look.Unit end
+    if right.Magnitude<.01 then right=Vector3.new(1,0,0) else right=right.Unit end
+
+    local forward
+    local width
+    local depth
+    if best.Size.Z>=best.Size.X then
+        forward=look
+        width=best.Size.X
+        depth=best.Size.Z
+    else
+        forward=right
+        width=best.Size.Z
+        depth=best.Size.X
+    end
+
     MapCF=CFrame.lookAt(topCenter,topCenter+forward)
-    MapSize=best.Size
+    MapSize=Vector3.new(width,best.Size.Y,depth)
     MapName=best.Name
     updateMapMarker()
     return true,MapName
@@ -545,13 +565,29 @@ end
 local function getMapFrame()
     if MapFloor and MapFloor.Parent then
         local topCenter=MapFloor.CFrame:PointToWorldSpace(Vector3.new(0,MapFloor.Size.Y/2,0))
-        local forward=Vector3.new(MapFloor.CFrame.LookVector.X,0,MapFloor.CFrame.LookVector.Z)
-        if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
+        local look=Vector3.new(MapFloor.CFrame.LookVector.X,0,MapFloor.CFrame.LookVector.Z)
+        local right=Vector3.new(MapFloor.CFrame.RightVector.X,0,MapFloor.CFrame.RightVector.Z)
+        if look.Magnitude<.01 then look=Vector3.new(0,0,-1) else look=look.Unit end
+        if right.Magnitude<.01 then right=Vector3.new(1,0,0) else right=right.Unit end
+
+        local forward
+        local width
+        local depth
+        if MapFloor.Size.Z>=MapFloor.Size.X then
+            forward=look
+            width=MapFloor.Size.X
+            depth=MapFloor.Size.Z
+        else
+            forward=right
+            width=MapFloor.Size.Z
+            depth=MapFloor.Size.X
+        end
+
         MapCF=CFrame.lookAt(topCenter,topCenter+forward)
-        MapSize=MapFloor.Size
+        MapSize=Vector3.new(width,MapFloor.Size.Y,depth)
     end
     if not MapCF then detectMapCenter() end
-    return MapCF or CFrame.new(), MapSize or Vector3.new(140,1,220)
+    return MapCF or CFrame.new(), MapSize or Vector3.new(155,1,250)
 end
 
 local COMPACT_SPAWN_BOUNDS=Vector3.new(155,1,250)
@@ -561,47 +597,25 @@ local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
         return preferredCF,COMPACT_SPAWN_BOUNDS
     end
 
-    -- Normal egg spawning follows the player's CURRENT position and facing.
-    -- The field is kept behind the player, but sized for the long/narrow map.
+    -- Use the detected map floor whenever possible. This fixes angled/wonky
+    -- rows caused by using the player's current facing and keeps equal margins
+    -- at both ends of the usable map.
+    local mapCF,mapBounds=getMapFrame()
+    if mapCF then
+        return mapCF,mapBounds
+    end
+
+    -- Last-resort fallback if the map cannot be detected.
     local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
     if root then
         local forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
         if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
-
         local hit=groundHitNear(root.Position,nil)
         local ground=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
-
-        local amount=math.clamp(tonumber(count) or 200,1,500)
-        local estimatedCols=20
-        if pattern=="ONE TYPE PER ROW" or pattern=="ALTERNATING ROWS" then
-            estimatedCols=16
-        elseif pattern=="SPLIT ROWS 3+3" or pattern=="PAIRS 2+2+2" then
-            estimatedCols=18
-        end
-        local estimatedRows=math.ceil(amount/estimatedCols)
-        local scale=math.clamp(tonumber(sizeValue) or 100,25,500)/100
-
-        -- Match the compact row spacing used by physicalLayout so the field
-        -- stays close together instead of leaving large empty lanes.
-        local estimatedRowGap=math.max(7.5,5.5+scale*1.75)
-        if estimatedRows>1 then
-            estimatedRowGap=math.min(estimatedRowGap,(COMPACT_SPAWN_BOUNDS.Z*.92)/(estimatedRows-1))
-        end
-        estimatedRowGap=math.max(7,estimatedRowGap)
-
-        local halfDepth=(estimatedRows-1)*estimatedRowGap/2
-        local backDistance=32+halfDepth
-        local center=ground-forward*backDistance
-
-        local probe=Vector3.new(center.X,root.Position.Y,center.Z)
-        local backHit=groundHitNear(probe,nil)
-        if backHit then center=backHit.Position else center=Vector3.new(center.X,ground.Y,center.Z) end
-
-        return CFrame.lookAt(center,center+forward),COMPACT_SPAWN_BOUNDS
+        return CFrame.lookAt(ground,ground+forward),COMPACT_SPAWN_BOUNDS
     end
 
-    -- Character unavailable: only then fall back to the detected map frame.
-    return getMapFrame()
+    return CFrame.new(),COMPACT_SPAWN_BOUNDS
 end
 
 local function physicalLayout(count,sizeValue,baseCF,bounds,pattern)
@@ -627,22 +641,24 @@ local function physicalLayout(count,sizeValue,baseCF,bounds,pattern)
     cols=math.min(cols,count)
     local rows=math.ceil(count/math.max(cols,1))
 
-    -- Compact spacing tuned to the map width in the supplied screenshot.
-    -- At 200% egg scale this is roughly 7-8 studs sideways and 9 studs row-to-row,
-    -- instead of the old ~17 / 30 stud gaps.
-    local naturalX=math.max(6.5,5.25+scale*1.5)
-    local naturalZ=math.max(7.5,5.5+scale*1.75)
-    local usableWidth=((bounds and bounds.X) or COMPACT_SPAWN_BOUNDS.X)*.90
-    local usableDepth=((bounds and bounds.Z) or COMPACT_SPAWN_BOUNDS.Z)*.92
+    -- Leave a VISIBLE but still compact gap between neighbouring eggs and
+    -- between rows. The old compact values could make 200% eggs look joined.
+    local naturalX=math.max(8.0,6.0+scale*2.15)
+    local naturalZ=math.max(10.0,7.0+scale*2.75)
+
+    -- Use almost all of the detected floor instead of leaving a large border.
+    -- We only compress when a batch physically needs more room than the map has.
+    local usableWidth=((bounds and bounds.X) or COMPACT_SPAWN_BOUNDS.X)*.96
+    local usableDepth=((bounds and bounds.Z) or COMPACT_SPAWN_BOUNDS.Z)*.96
 
     local sx=naturalX
     local sz=naturalZ
     if cols>1 then sx=math.min(sx,usableWidth/(cols-1)) end
     if rows>1 then sz=math.min(sz,usableDepth/(rows-1)) end
 
-    -- Floors stop very large batches from becoming an unreadable pile.
-    sx=math.max(5.75,sx)
-    sz=math.max(7,sz)
+    -- Never collapse rows completely together.
+    sx=math.max(6.75,sx)
+    sz=math.max(8.75,sz)
     return cols,rows,sx,sz
 end
 
@@ -650,10 +666,15 @@ local function layoutPosition(index,count,sizeValue,baseCF,bounds,pattern)
     local cols,rows,sx,sz=physicalLayout(count,sizeValue,baseCF,bounds,pattern)
     local row=math.floor((index-1)/cols)
     local col=(index-1)%cols
-    local x=(col-(cols-1)/2)*sx
+
+    -- Centre an incomplete final row instead of leaving all of its empty space
+    -- on one side of the map.
+    local rowStart=row*cols
+    local rowCols=math.min(cols,count-rowStart)
+    local x=(col-(rowCols-1)/2)*sx
     local z=(row-(rows-1)/2)*sz
     local pos=(baseCF*CFrame.new(x,0,z)).Position
-    return pos,row,col,cols,rows,sx,sz
+    return pos,row,col,cols,rows,sx,sz,rowCols
 end
 
 local function mixedEggFor(pattern,mix,row,col,index,cols)
@@ -839,12 +860,12 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     local lastRows=0
 
     for i=1,count do
-        local wanted,row,col,cols,rows=layoutPosition(i,count,size,baseCF,bounds,pattern)
+        local wanted,row,col,cols,rows,_,_,rowCols=layoutPosition(i,count,size,baseCF,bounds,pattern)
         lastCols=cols
         lastRows=rows
 
         local en=name
-        if name=="MIXED" then en=mixedEggFor(pattern,mix,row,col,i,cols) end
+        if name=="MIXED" then en=mixedEggFor(pattern,mix,row,col,i,rowCols or cols) end
 
         local info=en and templateInfo(en) or nil
         if info then
