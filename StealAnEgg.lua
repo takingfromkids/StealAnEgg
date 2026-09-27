@@ -569,10 +569,12 @@ local function visibleSpawnFrame(preferredCF,count)
         local hit=groundHitNear(root.Position,nil)
         local ground=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
 
-        -- Larger batches need a little more rear offset so the nearest row still
-        -- starts behind the player instead of wrapping around them.
+        -- Put the front row behind the player even with the larger row gaps.
         local amount=math.clamp(tonumber(count) or 200,1,500)
-        local backDistance=70+(amount*.10)
+        local estimatedCols=20
+        local estimatedRows=math.ceil(amount/estimatedCols)
+        local halfDepth=(estimatedRows-1)*22/2
+        local backDistance=32+halfDepth
         local center=ground-forward*backDistance
 
         local probe=Vector3.new(center.X,root.Position.Y,center.Z)
@@ -586,48 +588,38 @@ local function visibleSpawnFrame(preferredCF,count)
     return getMapFrame()
 end
 
-local function physicalLayout(count,sizeValue,baseCF,bounds)
+local function physicalLayout(count,sizeValue,baseCF,bounds,pattern)
     local scale=math.clamp(sizeValue,25,500)/100
-
-    -- Leave an outer border so the actual egg mesh, not just its pivot,
-    -- stays comfortably inside the map.
-    local marginX=math.max(10,5+scale*5)
-    local marginZ=math.max(12,6+scale*6)
-    local usableX=math.max(24,bounds.X-marginX*2)
-    local usableZ=math.max(30,bounds.Z-marginZ*2)
-
-    local desiredX=math.max(8.5,7+scale*4.5)
-    local desiredZ=math.max(11,9+scale*5.5)
-
-    local bestCols=10
-    local bestRows=math.ceil(count/bestCols)
-    local bestScore=-math.huge
-
-    -- Try several grid shapes and choose the one that gets closest to our
-    -- desired row/column gaps without exceeding the map rectangle.
-    for cols=8,32 do
-        local rows=math.ceil(count/cols)
-        local fitX=(cols<=1) and usableX or (usableX/(cols-1))
-        local fitZ=(rows<=1) and usableZ or (usableZ/(rows-1))
-        local score=math.min(fitX/desiredX,fitZ/desiredZ)
-
-        -- Small preference for wider row spacing because that was the cramped axis.
-        score=score+math.min(fitZ/desiredZ,1)*.08
-
-        if score>bestScore then
-            bestScore=score
-            bestCols=cols
-            bestRows=rows
-        end
+    local cols
+    if pattern=="ORIGINAL 6x20" then
+        cols=20
+    elseif pattern=="ONE TYPE PER ROW" then
+        cols=16
+    elseif pattern=="SPLIT ROWS 3+3" then
+        cols=18
+    elseif pattern=="PAIRS 2+2+2" then
+        cols=18
+    elseif pattern=="MIRRORED ROWS" then
+        cols=20
+    elseif pattern=="ALTERNATING ROWS" then
+        cols=16
+    elseif pattern=="DIAGONAL SEQUENCE" then
+        cols=20
+    else
+        cols=20
     end
+    cols=math.min(cols,count)
+    local rows=math.ceil(count/math.max(cols,1))
 
-    local sx=(bestCols<=1) and 0 or math.min(desiredX,usableX/(bestCols-1))
-    local sz=(bestRows<=1) and 0 or math.min(desiredZ,usableZ/(bestRows-1))
-    return bestCols,bestRows,sx,sz
+    -- Intentionally generous spacing: approximately one egg-height of empty
+    -- room between rows at normal scale.
+    local sx=math.max(10,8+scale*4.5)
+    local sz=math.max(22,14+scale*8)
+    return cols,rows,sx,sz
 end
 
-local function layoutPosition(index,count,sizeValue,baseCF,bounds)
-    local cols,rows,sx,sz=physicalLayout(count,sizeValue,baseCF,bounds)
+local function layoutPosition(index,count,sizeValue,baseCF,bounds,pattern)
+    local cols,rows,sx,sz=physicalLayout(count,sizeValue,baseCF,bounds,pattern)
     local row=math.floor((index-1)/cols)
     local col=(index-1)%cols
     local x=(col-(cols-1)/2)*sx
@@ -639,23 +631,32 @@ end
 local function mixedEggFor(pattern,mix,row,col,index,cols)
     local n=arrlen(mix)
     if n==0 then return nil end
-    if pattern=="ONE TYPE PER ROW" then
-        return mix[(row%n)+1]
+    local function at(i) return mix[(i%n)+1] end
+
+    if pattern=="ORIGINAL 6x20" then
+        -- 20-wide rows built from a repeating six-type sequence.
+        return at(row*6+(col%6))
+    elseif pattern=="ONE TYPE PER ROW" then
+        return at(row)
     elseif pattern=="SPLIT ROWS 3+3" then
-        local g=math.floor(col/3)
-        return mix[((row*2+g)%n)+1]
+        -- AAA BBB, then the next pair of types.
+        local block=math.floor(col/6)
+        local half=math.floor((col%6)/3)
+        return at(row*2+block*2+half)
     elseif pattern=="PAIRS 2+2+2" then
-        local g=math.floor(col/2)
-        return mix[((row*3+g)%n)+1]
+        -- AA BB CC, then the next trio of types.
+        local block=math.floor(col/6)
+        local pair=math.floor((col%6)/2)
+        return at(row*3+block*3+pair)
     elseif pattern=="MIRRORED ROWS" then
-        local k=(row%2==0) and col or (cols-1-col)
-        return mix[(k%n)+1]
+        local sequenceCol=(row%2==0) and col or (cols-1-col)
+        return at(sequenceCol)
     elseif pattern=="ALTERNATING ROWS" then
-        return mix[((row%2)%n)+1]
+        return at(row%2)
     elseif pattern=="DIAGONAL SEQUENCE" then
-        return mix[((row+col)%n)+1]
+        return at(row+col)
     end
-    return mix[((index-1)%n)+1]
+    return at(index-1)
 end
 
 local EggState={}; local HeldEgg=nil
@@ -672,10 +673,33 @@ local function weldEgg(o)
     for _,p in ipairs(o:GetDescendants()) do if p:IsA("BasePart") and p~=r and not p:FindFirstChild("SAE_Weld") then local w=Instance.new("WeldConstraint"); w.Name="SAE_Weld"; w.Part0=r; w.Part1=p; w.Parent=p end end
 end
 local function carryEgg(egg,carrier,key,model)
-    local st=EggState[egg]; if not st or st.carried or st.delivered then return false end
-    st.carried=true; st.claim=key; st.carrier=key; if st.prompt then st.prompt.Enabled=false end
-    eggPhysics(egg,true); pivot(egg,carrier.CFrame*CFrame.new(1.7,-.35,-2.7)); weldEgg(egg); local er=rootOf(egg); if not er then st.carried=false; st.claim=nil; return false end
-    eggPhysics(egg,false); local w=Instance.new("WeldConstraint"); w.Name="SAE_CarryWeld"; w.Part0=carrier; w.Part1=er; w.Parent=er; return true
+    local st=EggState[egg]
+    if not st or st.carried or st.delivered then return false end
+    st.carried=true
+    st.claim=key
+    st.carrier=key
+    if st.prompt then st.prompt.Enabled=false end
+
+    local visualHeight=4
+    pcall(function()
+        if egg:IsA("Model") then visualHeight=egg:GetExtentsSize().Y
+        elseif egg:IsA("BasePart") then visualHeight=egg.Size.Y end
+    end)
+    local lift=.9+math.clamp(visualHeight*.10,0,1.4)
+
+    eggPhysics(egg,true)
+    pivot(egg,carrier.CFrame*CFrame.new(0,lift,-2.8))
+    weldEgg(egg)
+    local er=rootOf(egg)
+    if not er then st.carried=false; st.claim=nil; return false end
+
+    eggPhysics(egg,false)
+    local w=Instance.new("WeldConstraint")
+    w.Name="SAE_CarryWeld"
+    w.Part0=carrier
+    w.Part1=er
+    w.Parent=er
+    return true
 end
 local function dropEgg(egg,pos,delivered)
     if not egg or not egg.Parent then return end; local r=rootOf(egg); if r then local w=r:FindFirstChild("SAE_CarryWeld"); if w then w:Destroy() end end
@@ -782,7 +806,7 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     local lastRows=0
 
     for i=1,count do
-        local wanted,row,col,cols,rows=layoutPosition(i,count,size,baseCF,bounds)
+        local wanted,row,col,cols,rows=layoutPosition(i,count,size,baseCF,bounds,pattern)
         lastCols=cols
         lastRows=rows
 
@@ -2090,13 +2114,13 @@ clearEggBtn.MouseButton1Click:Connect(function() local n=clearSpawnedEggs(); spa
 
 -- mixed layout page from the reference screenshots
 local patternDescriptions={
-    ["ORIGINAL 6x20"]="Classic rows; mixed egg types cycle across the row.",
-    ["ONE TYPE PER ROW"]="Each physical row uses one egg type.",
-    ["SPLIT ROWS 3+3"]="Egg types change in groups of three across each row.",
-    ["PAIRS 2+2+2"]="Egg types repeat in pairs across each row.",
-    ["MIRRORED ROWS"]="Every second row reverses the type sequence.",
-    ["ALTERNATING ROWS"]="Rows alternate between egg types.",
-    ["DIAGONAL SEQUENCE"]="Egg types shift diagonally from row to row."
+    ["ORIGINAL 6x20"]="20 eggs across; a six-type sequence repeats through each row.",
+    ["ONE TYPE PER ROW"]="Every egg in one row is the same type; the next row changes type.",
+    ["SPLIT ROWS 3+3"]="Three of one type, then three of the next type, repeating across the row.",
+    ["PAIRS 2+2+2"]="Two of type A, two of type B, two of type C, repeating across the row.",
+    ["MIRRORED ROWS"]="Every second row reverses the left-to-right sequence.",
+    ["ALTERNATING ROWS"]="Whole rows alternate between two egg types.",
+    ["DIAGONAL SEQUENCE"]="Each row shifts the sequence by one, making diagonal bands."
 }
 local patStatus=label(PatternPage,"MIXED EGGS - select a pattern",UDim2.fromOffset(5,3),UDim2.new(1,-10,0,25),11); patStatus.Font=Enum.Font.GothamBold
 for i,n in ipairs(PATTERNS) do
