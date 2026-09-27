@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local TextService = game:GetService("TextService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 
@@ -19,9 +20,27 @@ for _,guiName in ipairs({"SAE_BOOT_V9","SAE_BOOT_V8","SAE_BOOT_V7","SAE_BOOT_V6"
     local old = PG:FindFirstChild(guiName)
     if old then old:Destroy() end
 end
-for _,n in ipairs({"SAE_LocalEggs","SAE_LocalNPCs","SAE_SafeZoneMarker","SAE_MorphShell"}) do
+for _,n in ipairs({"SAE_LocalEggs","SAE_LocalNPCs","SAE_SafeZoneMarker"}) do
     local x = workspace:FindFirstChild(n)
     if x then x:Destroy() end
+end
+-- Earlier versions placed the morph under CurrentCamera. Remove every stale
+-- display rig and undo the local invisibility they left on the real character.
+local hadStaleMorph=false
+while true do
+    local old=workspace:FindFirstChild("SAE_MorphShell",true)
+    if not old then break end
+    old:Destroy()
+    hadStaleMorph=true
+end
+if hadStaleMorph and P.Character then
+    for _,part in ipairs(P.Character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.LocalTransparencyModifier=0
+        elseif (part:IsA("Decal") or part:IsA("Texture")) and part.Transparency==1 then
+            part.Transparency=0
+        end
+    end
 end
 
 local CFG = {
@@ -139,9 +158,16 @@ end
 
 -- Create every important panel immediately before any game scan.
 local Main=window("MainPanel","⚡ ADMIN ABUSE","Developer control panel",380,500,UDim2.new(.22,0,.52,0))
-local Morph=window("MorphPanel","Avatar Morpher","Physics-safe client visual morph",390,300,UDim2.new(.74,0,.28,0))
+Main.BackgroundTransparency=.12
+local Morph=window("MorphPanel","Avatar Morpher","Change your avatar's look",350,290,UDim2.new(.74,0,.28,0))
 local BotsPanel=window("BotPanel","NPC COLLECTORS","Collectors, avatars and Sammy",400,505,UDim2.new(.74,0,.68,0))
+Morph.BackgroundTransparency=Main.BackgroundTransparency
+BotsPanel.BackgroundTransparency=Main.BackgroundTransparency
 local Console=window("ConsolePanel","SERVER CONSOLE","TAB opens or closes this window",710,410,UDim2.new(.5,0,.5,0)); Console.Visible=false
+
+-- Remove any overlay left by older versions.
+local oldSnow=PG:FindFirstChild("SAE_SnowOverlay")
+if oldSnow then oldSnow:Destroy() end
 
 -- Permanent launchers so closed panels never disappear permanently.
 local Launch=Instance.new("Frame"); Launch.Position=UDim2.new(0,12,.5,-58); Launch.Size=UDim2.fromOffset(106,108); Launch.BackgroundTransparency=1; Launch.Parent=Gui
@@ -483,76 +509,527 @@ local function countBatch(tag)
 end
 
 -- Character tag.
+local CoownerColor=Color3.fromRGB(112,43,180)
 local Role="OWNER"; local Display=P.DisplayName; local Username=P.Name
+local TagAdornee=nil
+local TagShineTween=nil
+local function setTagAdornee(part)
+    TagAdornee=part
+    local head=P.Character and P.Character:FindFirstChild("Head")
+    local tag=head and head:FindFirstChild("SAE_Tag")
+    if tag and tag:IsA("BillboardGui") then tag.Adornee=part or head end
+end
 local function applyTag()
-    local ch=P.Character; if not ch then return end; local h=ch:FindFirstChildOfClass("Humanoid"); local head=ch:FindFirstChild("Head"); if h then h.DisplayDistanceType=Enum.HumanoidDisplayDistanceType.None; h.NameDisplayDistance=0; h.HealthDisplayDistance=0 end; if not head then return end
-    local o=head:FindFirstChild("SAE_Tag"); if o then o:Destroy() end; local g=Instance.new("BillboardGui"); g.Name="SAE_Tag"; g.Size=UDim2.fromOffset(235,76); g.StudsOffset=Vector3.new(0,3.8,0); g.AlwaysOnTop=true; g.Parent=head
-    local a=label(g,"["..Role.."]",UDim2.new(),UDim2.new(1,0,0,27),20); a.Font=Enum.Font.GothamBlack; a.TextXAlignment=Enum.TextXAlignment.Center; a.TextStrokeTransparency=0; a.TextColor3=Role=="OWNER" and C.red or C.purple2
-    local b=label(g,Display,UDim2.fromOffset(0,29),UDim2.new(1,0,0,22),18); b.Font=Enum.Font.GothamBold; b.TextXAlignment=Enum.TextXAlignment.Center; b.TextStrokeTransparency=.1
-    local c=label(g,"@"..Username:gsub("^@",""),UDim2.fromOffset(0,52),UDim2.new(1,0,0,18),14); c.TextXAlignment=Enum.TextXAlignment.Center; c.TextColor3=Color3.fromRGB(215,215,220)
-end
-
--- Visual morph is parented under CurrentCamera, never workspace physics.
-local MorphShell=nil; local MorphConn=nil; local Hidden={}; local MorphAnim=nil
-local function restoreChar() for o,v in pairs(Hidden) do if o and o.Parent then pcall(function() if o:IsA("BasePart") then o.LocalTransparencyModifier=v elseif o:IsA("Decal") or o:IsA("Texture") then o.Transparency=v end end) end end; Hidden={} end
-local function hideChar() restoreChar(); local ch=P.Character; if not ch then return end; for _,o in ipairs(ch:GetDescendants()) do if o:IsA("BasePart") then Hidden[o]=o.LocalTransparencyModifier; o.LocalTransparencyModifier=1 elseif o:IsA("Decal") or o:IsA("Texture") then Hidden[o]=o.Transparency; o.Transparency=1 end end end
-local function resetMorph() if MorphConn then MorphConn:Disconnect(); MorphConn=nil end; if MorphShell then MorphShell:Destroy(); MorphShell=nil end; MorphAnim=nil; restoreChar() end
-local function footOffset(m,r)
-    local lowest=nil; for _,n in ipairs({"LeftFoot","RightFoot","Left Leg","Right Leg","LeftLowerLeg","RightLowerLeg"}) do local p=m:FindFirstChild(n,true); if p and p:IsA("BasePart") then local y=p.Position.Y-p.Size.Y/2; if not lowest or y<lowest then lowest=y end end end
-    if lowest then return r.Position.Y-lowest end; local h=m:FindFirstChildOfClass("Humanoid"); return h and (h.HipHeight+r.Size.Y/2) or 3
-end
-local function doMorph(user)
-    resetMorph()
-    local uid
-    if not pcall(function() uid=Players:GetUserIdFromNameAsync(user) end) then return false,"Username not found." end
-    local m
-    if not pcall(function() m=createAvatar(uid) end) or not m then return false,"Avatar could not be created." end
-
-    local sr=m:FindFirstChild("HumanoidRootPart")
-    local sh=m:FindFirstChildOfClass("Humanoid")
     local ch=P.Character
-    local rr=ch and ch:FindFirstChild("HumanoidRootPart")
-    if not sr or not sh or not rr then m:Destroy(); return false,"Morph root missing." end
+    if not ch then return end
+    local h=ch:FindFirstChildOfClass("Humanoid")
+    local head=ch:FindFirstChild("Head")
+    if h then
+        h.DisplayDistanceType=Enum.HumanoidDisplayDistanceType.None
+        h.NameDisplayDistance=0
+        h.HealthDisplayDistance=0
+    end
+    if not head then return end
+    if TagShineTween then TagShineTween:Cancel(); TagShineTween=nil end
+    local old=head:FindFirstChild("SAE_Tag")
+    if old then old:Destroy() end
+    local g=Instance.new("BillboardGui")
+    g.Name="SAE_Tag"
+    g.Size=UDim2.fromOffset(235,76)
+    g.StudsOffsetWorldSpace=Vector3.new(0,2.2,0)
+    g.Adornee=TagAdornee or head
+    g.AlwaysOnTop=true
+    g.Parent=head
 
-    -- The shell is completely isolated from the real character. It is never welded to,
-    -- parented under, or used to reposition the player's physical character.
-    for _,o in ipairs(m:GetDescendants()) do
-        if o:IsA("BasePart") then
-            o.CanCollide=false
-            o.CanTouch=false
-            o.CanQuery=false
-            o.Massless=true
-            o.AssemblyLinearVelocity=Vector3.zero
-            o.AssemblyAngularVelocity=Vector3.zero
-            o.Anchored=false
+    local roleText="["..Role.."]"
+    local a=label(g,roleText,UDim2.new(),UDim2.new(1,0,0,27),20)
+    a.Font=Enum.Font.GothamBlack
+    a.TextXAlignment=Enum.TextXAlignment.Center
+    a.TextStrokeTransparency=0
+    a.TextStrokeColor3=Color3.new(0,0,0)
+    a.TextColor3=Role=="OWNER" and Color3.fromRGB(235,18,35) or (Role=="CO-OWNER" and CoownerColor or C.purple2)
+    if Role=="OWNER" or Role=="CO-OWNER" then
+        -- Keep the dark outline separate from the moving color highlight.
+        local shine=label(g,roleText,a.Position,a.Size,20)
+        shine.Font=a.Font
+        shine.TextXAlignment=Enum.TextXAlignment.Center
+        shine.TextColor3=C.white
+        shine.TextStrokeTransparency=1
+        local gradient=Instance.new("UIGradient")
+        gradient.Color=Role=="CO-OWNER" and ColorSequence.new({
+            ColorSequenceKeypoint.new(0,CoownerColor),
+            ColorSequenceKeypoint.new(.42,Color3.fromRGB(145,66,205)),
+            ColorSequenceKeypoint.new(.5,Color3.fromRGB(225,202,255)),
+            ColorSequenceKeypoint.new(.58,Color3.fromRGB(145,66,205)),
+            ColorSequenceKeypoint.new(1,CoownerColor)
+        }) or ColorSequence.new({
+            ColorSequenceKeypoint.new(0,Color3.fromRGB(225,18,33)),
+            ColorSequenceKeypoint.new(.42,Color3.fromRGB(255,36,48)),
+            ColorSequenceKeypoint.new(.5,Color3.fromRGB(255,220,220)),
+            ColorSequenceKeypoint.new(.58,Color3.fromRGB(255,36,48)),
+            ColorSequenceKeypoint.new(1,Color3.fromRGB(225,18,33))
+        })
+        gradient.Rotation=15
+        gradient.Offset=Vector2.new(-1,0)
+        gradient.Parent=shine
+        TagShineTween=TweenService:Create(gradient,
+            TweenInfo.new(2.2,Enum.EasingStyle.Linear,Enum.EasingDirection.Out,-1,false,.8),
+            {Offset=Vector2.new(1,0)})
+        TagShineTween:Play()
+    end
+
+    local nameRow=Instance.new("Frame")
+    nameRow.BackgroundTransparency=1
+    nameRow.Position=UDim2.fromOffset(0,29)
+    nameRow.Size=UDim2.new(1,0,0,22)
+    nameRow.Parent=g
+    local layout=Instance.new("UIListLayout")
+    layout.FillDirection=Enum.FillDirection.Horizontal
+    layout.HorizontalAlignment=Enum.HorizontalAlignment.Center
+    layout.VerticalAlignment=Enum.VerticalAlignment.Center
+    layout.SortOrder=Enum.SortOrder.LayoutOrder
+    layout.Padding=UDim.new(0,3)
+    layout.Parent=nameRow
+    local nameWidth=math.min(205,TextService:GetTextSize(Display,18,Enum.Font.GothamBold,Vector2.new(1000,22)).X+2)
+    local b=label(nameRow,Display,UDim2.new(),UDim2.fromOffset(nameWidth,22),18)
+    b.LayoutOrder=1
+    b.Font=Enum.Font.GothamBold
+    b.TextTruncate=Enum.TextTruncate.AtEnd
+    b.TextStrokeTransparency=.1
+    local badge=verified(nameRow,18)
+    badge.LayoutOrder=2
+
+    local c=label(g,"@"..Username:gsub("^@",""),UDim2.fromOffset(0,52),UDim2.new(1,0,0,18),14)
+    c.TextXAlignment=Enum.TextXAlignment.Center
+    c.Font=Enum.Font.GothamBold
+    c.TextColor3=Color3.fromRGB(242,242,247)
+    c.TextStrokeColor3=Color3.new(0,0,0)
+    c.TextStrokeTransparency=.1
+end
+
+-- Role buttons control the overhead tag and reflect its selected state.
+local RoleSelectors={}
+local function setRole(role)
+    Role=role
+    applyTag()
+    for _,selector in ipairs(RoleSelectors) do
+        selector.owner.BackgroundColor3=role=="OWNER" and C.red or C.card2
+        selector.coowner.BackgroundColor3=role=="CO-OWNER" and CoownerColor or C.card2
+        selector.admin.BackgroundColor3=role=="ADMIN" and C.purple or C.card2
+        if selector.status then
+            selector.status.Text=role.." tag applied."
+            selector.status.TextColor3=C.green
         end
     end
-    sr.Anchored=true
-    sh.AutoRotate=false
-    sh.DisplayDistanceType=Enum.HumanoidDisplayDistanceType.None
-    sh.NameDisplayDistance=0
-    sh.HealthDisplayDistance=0
-    pcall(function() sh.EvaluateStateMachine=false end)
+end
+local function addRoleSelector(owner,coowner,admin,status)
+    table.insert(RoleSelectors,{owner=owner,coowner=coowner,admin=admin,status=status})
+    owner.BackgroundColor3=Role=="OWNER" and C.red or C.card2
+    coowner.BackgroundColor3=Role=="CO-OWNER" and CoownerColor or C.card2
+    admin.BackgroundColor3=Role=="ADMIN" and C.purple or C.card2
+    owner.MouseButton1Click:Connect(function() setRole("OWNER") end)
+    coowner.MouseButton1Click:Connect(function() setRole("CO-OWNER") end)
+    admin.MouseButton1Click:Connect(function() setRole("ADMIN") end)
+end
 
-    m.Name="SAE_MorphShell"
-    m:PivotTo(rr.CFrame)
-    m.Parent=workspace.CurrentCamera or workspace
-    MorphShell=m
-    MorphAnim=animations(sh)
-    hideChar()
-
-    MorphConn=RunService.RenderStepped:Connect(function()
-        if not MorphShell or not MorphShell.Parent then return end
-        local r=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
-        if not r then return end
-        -- Root-to-root alignment avoids the old vertical-offset bug that made the morph appear airborne.
-        MorphShell:PivotTo(r.CFrame)
-        sr.AssemblyLinearVelocity=Vector3.zero
-        sr.AssemblyAngularVelocity=Vector3.zero
-        local v=r.AssemblyLinearVelocity
-        animate(MorphAnim,Vector3.new(v.X,0,v.Z).Magnitude)
+-- Client-side appearance. Keep the real character and its controls untouched.
+local MorphShell=nil; local MorphConn=nil; local MorphAnim=nil; local Hidden={}
+local MorphDescConn=nil
+local MorphVisibilityBound=false
+local MorphVisibilityStep="SAE_MorphVisibility_"..P.UserId
+local function restoreChar()
+    for o,v in pairs(Hidden) do
+        if o and o.Parent then
+            pcall(function()
+                if o:IsA("BasePart") then o.LocalTransparencyModifier=v
+                elseif o:IsA("Decal") or o:IsA("Texture") then o.Transparency=v end
+            end)
+        end
+    end
+    Hidden={}
+end
+local function keepHidden(o)
+    if o:IsA("BasePart") then
+        if Hidden[o]==nil then Hidden[o]=o.LocalTransparencyModifier end
+        o.LocalTransparencyModifier=1
+    elseif o:IsA("Decal") or o:IsA("Texture") then
+        if Hidden[o]==nil then Hidden[o]=o.Transparency end
+        o.Transparency=1
+    end
+end
+local function hideChar(ch)
+    restoreChar()
+    for _,o in ipairs(ch:GetDescendants()) do keepHidden(o) end
+    MorphDescConn=ch.DescendantAdded:Connect(function(o)
+        if not MorphShell or P.Character~=ch then return end
+        keepHidden(o)
+        for _,child in ipairs(o:GetDescendants()) do keepHidden(child) end
     end)
-    return true,"Morphed into @"..user
+    -- Other local scripts may make the real body visible again during
+    -- interactions. Reapply the cosmetic hiding after render updates.
+    RunService:BindToRenderStep(MorphVisibilityStep,Enum.RenderPriority.Last.Value+1,function()
+        if not MorphShell or P.Character~=ch then return end
+        for o in pairs(Hidden) do
+            if o.Parent and o:IsDescendantOf(ch) then
+                if o:IsA("BasePart") then
+                    if o.LocalTransparencyModifier~=1 then o.LocalTransparencyModifier=1 end
+                elseif o:IsA("Decal") or o:IsA("Texture") then
+                    if o.Transparency~=1 then o.Transparency=1 end
+                end
+            end
+        end
+    end)
+    MorphVisibilityBound=true
+end
+local function resetMorph()
+    if MorphConn then MorphConn:Disconnect(); MorphConn=nil end
+    if MorphVisibilityBound then
+        RunService:UnbindFromRenderStep(MorphVisibilityStep)
+        MorphVisibilityBound=false
+    end
+    if MorphDescConn then MorphDescConn:Disconnect(); MorphDescConn=nil end
+    setTagAdornee(nil)
+    if MorphShell then MorphShell:Destroy(); MorphShell=nil end
+    MorphAnim=nil
+    restoreChar()
+end
+
+local function connectedParts(root)
+    local connected={[root]=true}
+    for _,part in ipairs(root:GetConnectedParts(true)) do connected[part]=true end
+    return connected
+end
+
+local function repairAvatarRig(model,root,humanoid)
+    -- Client-created avatar models can omit accessory welds. Build the body
+    -- joints first, then weld each loose handle by matching attachments.
+    pcall(function() humanoid:BuildRigFromAttachments() end)
+    local connected=connectedParts(root)
+    local body={}
+    for _,part in ipairs(model:GetChildren()) do
+        if part:IsA("BasePart") then
+            table.insert(body,part)
+            if part~=root and not connected[part] then
+                local joint=Instance.new("WeldConstraint")
+                joint.Name="SAE_BodyFallback"
+                joint.Part0=root; joint.Part1=part; joint.Parent=root
+            end
+        end
+    end
+    connected=connectedParts(root)
+    for _,item in ipairs(model:GetChildren()) do
+        if item:IsA("Accessory") then
+            local handle=item:FindFirstChild("Handle")
+            if not handle or not handle:IsA("BasePart") then return false end
+            local bodyAttachment,handleAttachment
+            for _,att in ipairs(handle:GetDescendants()) do
+                if att:IsA("Attachment") and att.Parent:IsA("BasePart") then
+                    for _,part in ipairs(body) do
+                        local match=part:FindFirstChild(att.Name,true)
+                        if match and match:IsA("Attachment") and match.Parent:IsA("BasePart") then
+                            bodyAttachment=match; handleAttachment=att; break
+                        end
+                    end
+                end
+                if bodyAttachment then break end
+            end
+            if bodyAttachment then
+                -- Match the two attachment frames even if a stale weld exists.
+                for _,joint in ipairs(handle:GetChildren()) do
+                    if joint:IsA("JointInstance") and
+                        (joint.Name=="AccessoryWeld" or not joint.Part0 or not joint.Part1) then
+                        joint:Destroy()
+                    end
+                end
+                local joint=Instance.new("Weld")
+                joint.Name="AccessoryWeld"
+                joint.Part0=bodyAttachment.Parent
+                joint.Part1=handleAttachment.Parent
+                joint.C0=bodyAttachment.CFrame
+                joint.C1=handleAttachment.CFrame
+                handle.CFrame=joint.Part0.CFrame*joint.C0*joint.C1:Inverse()
+                joint.Parent=handle
+            elseif not connected[handle] then
+                return false
+            end
+        end
+    end
+    connected=connectedParts(root)
+    -- Keep extra pieces in a multi-part accessory attached to its handle.
+    for _,item in ipairs(model:GetChildren()) do
+        if item:IsA("Accessory") then
+            local handle=item:FindFirstChild("Handle")
+            for _,part in ipairs(item:GetDescendants()) do
+                if part:IsA("BasePart") and part~=handle and not connected[part] then
+                    local joint=Instance.new("WeldConstraint")
+                    joint.Name="SAE_AccessoryFallback"
+                    joint.Part0=handle; joint.Part1=part; joint.Parent=handle
+                end
+            end
+        end
+    end
+    connected=connectedParts(root)
+    for _,part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") and not connected[part] then return false end
+    end
+    return true
+end
+
+local function doMorph(user)
+    local uid
+    if not pcall(function() uid=Players:GetUserIdFromNameAsync(user) end) then return false,"Username not found." end
+    local model
+    if not pcall(function() model=createAvatar(uid) end) or not model then return false,"Avatar could not be created." end
+
+    local character=P.Character
+    local realRoot=character and character:FindFirstChild("HumanoidRootPart")
+    local realHumanoid=character and character:FindFirstChildOfClass("Humanoid")
+    local root=model:FindFirstChild("HumanoidRootPart")
+    local humanoid=model:FindFirstChildOfClass("Humanoid")
+    if not realRoot or not realHumanoid or not root or not humanoid then
+        model:Destroy()
+        return false,"Character or avatar rig unavailable."
+    end
+
+    -- A visual pose copy needs the same body-part names as the player rig.
+    if humanoid.RigType~=realHumanoid.RigType then
+        local matched
+        local ok=pcall(function()
+            local description=Players:GetHumanoidDescriptionFromUserIdAsync(uid)
+            matched=Players:CreateHumanoidModelFromDescriptionAsync(description,realHumanoid.RigType)
+        end)
+        model:Destroy()
+        if not ok or not matched then return false,"This avatar rig could not be matched to your character." end
+        model=matched
+        root=model:FindFirstChild("HumanoidRootPart")
+        humanoid=model:FindFirstChildOfClass("Humanoid")
+        if not root or not humanoid then model:Destroy(); return false,"Matched avatar rig unavailable." end
+    end
+
+    local camera=workspace.CurrentCamera
+    if not camera then model:Destroy(); return false,"Camera unavailable." end
+    model.PrimaryPart=root
+    model:PivotTo(realRoot.CFrame)
+    model.Parent=camera
+    local rigOk,assembled=pcall(function() return repairAvatarRig(model,root,humanoid) end)
+    if not rigOk or not assembled or P.Character~=character then
+        model:Destroy()
+        return false,"Avatar parts could not be attached; your appearance was kept."
+    end
+    -- Remove any joint that accidentally points outside the cosmetic model.
+    for _,joint in ipairs(model:GetDescendants()) do
+        if joint:IsA("JointInstance") or joint:IsA("WeldConstraint") then
+            local p0,p1=joint.Part0,joint.Part1
+            if (p0 and not p0:IsDescendantOf(model)) or (p1 and not p1:IsDescendantOf(model)) then
+                joint:Destroy()
+            end
+        end
+    end
+    for part in pairs(connectedParts(root)) do
+        if not part:IsDescendantOf(model) then
+            model:Destroy()
+            return false,"Avatar rig was not isolated; your appearance was kept."
+        end
+    end
+
+    local bodyPairs={}
+    local bodyMap={}
+    for _,part in ipairs(model:GetChildren()) do
+        if part:IsA("BasePart") then
+            local realPart=character:FindFirstChild(part.Name)
+            if not realPart or not realPart:IsA("BasePart") then
+                model:Destroy()
+                return false,"Avatar body could not match your character."
+            end
+            bodyMap[part]=realPart
+            table.insert(bodyPairs,{visual=part,real=realPart})
+        end
+    end
+
+    -- Preserve the target avatar's own joint offsets. Matching body-part
+    -- centers directly leaves gaps when the two avatars have different sizes.
+    local function jointFrames(joint)
+        if joint:IsA("Motor6D") then
+            return joint.Part0,joint.Part1,joint.C0,joint.C1
+        elseif joint:IsA("AnimationConstraint") then
+            local a0,a1=joint.Attachment0,joint.Attachment1
+            if a0 and a1 then return a0.Parent,a1.Parent,a0.CFrame,a1.CFrame end
+        end
+    end
+    local realJoints={}
+    for _,joint in ipairs(character:GetDescendants()) do
+        local p0,p1,c0,c1=jointFrames(joint)
+        if p0 and p1 and p0:IsA("BasePart") and p1:IsA("BasePart")
+            and character:FindFirstChild(p0.Name)==p0 and character:FindFirstChild(p1.Name)==p1 then
+            realJoints[p0.Name.."|"..p1.Name]={c0=c0,c1=c1}
+        end
+    end
+    local poseEdges={}
+    for _,joint in ipairs(model:GetDescendants()) do
+        local p0,p1,c0,c1=jointFrames(joint)
+        if p0 and p1 and bodyMap[p0] and bodyMap[p1] then
+            local real=realJoints[p0.Name.."|"..p1.Name]
+            if not real then
+                local reversed=realJoints[p1.Name.."|"..p0.Name]
+                if reversed then real={c0=reversed.c1,c1=reversed.c0} end
+            end
+            if real then
+                table.insert(poseEdges,{part0=p0,part1=p1,c0=c0,c1=c1,
+                    realPart0=bodyMap[p0],realPart1=bodyMap[p1],
+                    realC0=real.c0,realC1=real.c1})
+            end
+        end
+    end
+    local orderedPose={}
+    local seen={[root]=true}
+    -- Traverse from the root so every parent is positioned before its child.
+    for _=1,#bodyPairs do
+        local added=false
+        for _,edge in ipairs(poseEdges) do
+            if seen[edge.part0] ~= seen[edge.part1] then
+                edge.forward=seen[edge.part0]
+                seen[edge.part0]=true
+                seen[edge.part1]=true
+                table.insert(orderedPose,edge)
+                added=true
+            end
+        end
+        if not added then break end
+    end
+    for _,pair in ipairs(bodyPairs) do
+        if not seen[pair.visual] then
+            model:Destroy()
+            return false,"Avatar body joints could not match your character."
+        end
+    end
+
+    -- Capture where each accessory sits relative to its target body part.
+    local accessories={}
+    for _,item in ipairs(model:GetChildren()) do
+        if item:IsA("Accessory") then
+            local handle=item:FindFirstChild("Handle")
+            if not handle or not handle:IsA("BasePart") then
+                model:Destroy()
+                return false,"Avatar accessory could not be displayed."
+            end
+            local attachedTo
+            for _,joint in ipairs(handle:GetChildren()) do
+                if joint:IsA("JointInstance") then
+                    if joint.Part0==handle and bodyMap[joint.Part1] then attachedTo=joint.Part1; break end
+                    if joint.Part1==handle and bodyMap[joint.Part0] then attachedTo=joint.Part0; break end
+                end
+            end
+            attachedTo=attachedTo or root
+            local info={handle=handle,body=attachedTo,offset=attachedTo.CFrame:ToObjectSpace(handle.CFrame),extras={}}
+            for _,part in ipairs(item:GetDescendants()) do
+                if part:IsA("BasePart") and part~=handle then
+                    table.insert(info.extras,{part=part,offset=handle.CFrame:ToObjectSpace(part.CFrame)})
+                end
+            end
+            table.insert(accessories,info)
+        end
+    end
+
+    -- These are display parts only. No moving or welded assembly is added
+    -- to the player's real character or simulated beside it.
+    for _,part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide=false
+            part.CanTouch=false
+            part.CanQuery=false
+            part.Anchored=true
+        end
+    end
+    pcall(function() humanoid.EvaluateStateMachine=false end)
+    humanoid.AutoRotate=false
+    humanoid.DisplayDistanceType=Enum.HumanoidDisplayDistanceType.None
+    humanoid.NameDisplayDistance=0
+    humanoid.HealthDisplayDistance=0
+
+    -- HipHeight can stay the same even when an avatar's visible legs are
+    -- shorter. Measure the actual leg bounds after the first copied pose.
+    local function legBottom(rig,rigType)
+        local names
+        if rigType==Enum.HumanoidRigType.R15 then
+            names={"LeftFoot","RightFoot","LeftLowerLeg","RightLowerLeg","LeftUpperLeg","RightUpperLeg"}
+        else
+            names={"Left Leg","Right Leg"}
+        end
+        local lowest
+        for _,name in ipairs(names) do
+            local part=rig:FindFirstChild(name)
+            if part and part:IsA("BasePart") and part.Transparency<.95 then
+                local cf,size=part.CFrame,part.Size
+                local extent=(math.abs(cf.XVector.Y)*size.X
+                    +math.abs(cf.YVector.Y)*size.Y
+                    +math.abs(cf.ZVector.Y)*size.Z)/2
+                local bottom=cf.Position.Y-extent
+                lowest=lowest and math.min(lowest,bottom) or bottom
+            end
+        end
+        return lowest
+    end
+    local visualHeightOffset=nil
+
+    local function copyPose()
+        for _,pair in ipairs(bodyPairs) do
+            if not pair.visual.Parent or not pair.real.Parent then return false end
+        end
+        root.CFrame=realRoot.CFrame+Vector3.new(0,visualHeightOffset or 0,0)
+        for _,edge in ipairs(orderedPose) do
+            -- Recover the live joint pose from the real character, then apply
+            -- that pose around the target avatar's shoulder/neck/hip offsets.
+            local motion=edge.realC0:Inverse()*edge.realPart0.CFrame:Inverse()
+                *edge.realPart1.CFrame*edge.realC1
+            if edge.forward then
+                edge.part1.CFrame=edge.part0.CFrame*edge.c0*motion*edge.c1:Inverse()
+            else
+                edge.part0.CFrame=edge.part1.CFrame*edge.c1*motion:Inverse()*edge.c0:Inverse()
+            end
+        end
+        if visualHeightOffset==nil then
+            local visualBottom=legBottom(model,humanoid.RigType)
+            local realBottom=legBottom(character,realHumanoid.RigType)
+            local floorY
+            if realHumanoid.FloorMaterial~=Enum.Material.Air then
+                local params=RaycastParams.new()
+                params.FilterType=Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances={character,model,EggFolder,NPCFolder}
+                params.RespectCanCollide=true
+                local hit=workspace:Raycast(realRoot.Position,Vector3.new(0,-12,0),params)
+                if hit then floorY=hit.Position.Y end
+            end
+            if visualBottom and (floorY or realBottom) then
+                visualHeightOffset=(floorY or realBottom)-visualBottom+.02
+            else
+                -- A rig without visible leg parts still gets a safe height.
+                visualHeightOffset=(root.Size.Y-realRoot.Size.Y)/2
+                    +humanoid.HipHeight-realHumanoid.HipHeight
+            end
+            local shift=Vector3.new(0,visualHeightOffset,0)
+            for _,pair in ipairs(bodyPairs) do pair.visual.CFrame=pair.visual.CFrame+shift end
+        end
+        for _,info in ipairs(accessories) do
+            info.handle.CFrame=info.body.CFrame*info.offset
+            for _,extra in ipairs(info.extras) do
+                extra.part.CFrame=info.handle.CFrame*extra.offset
+            end
+        end
+        return true
+    end
+    if not copyPose() then model:Destroy(); return false,"Character changed during morph." end
+
+    resetMorph()
+    model.Name="SAE_MorphShell"
+    MorphShell=model
+    MorphConn=RunService.RenderStepped:Connect(function()
+        if MorphShell~=model or not model:IsDescendantOf(workspace) or P.Character~=character or not copyPose() then
+            resetMorph()
+        end
+    end)
+    hideChar(character)
+    setTagAdornee(model:FindFirstChild("Head"))
+    return true,"Morphed into @"..user.." (local appearance)"
 end
 
 -- Trails.
@@ -987,9 +1464,11 @@ Nav.Position=UDim2.fromOffset(11,70)
 Nav.Size=UDim2.new(1,-22,0,34)
 Nav.BackgroundTransparency=1
 Nav.Parent=Main
-local HomeBtn=button(Nav,"Home",UDim2.fromOffset(0,0),UDim2.fromOffset(70,31),true)
-local BackBtn=button(Nav,"Back",UDim2.fromOffset(76,0),UDim2.fromOffset(70,31),true)
-local PageTitle=label(Nav,"Home",UDim2.fromOffset(156,0),UDim2.new(1,-156,0,31),13)
+local BackBtn=button(Nav,"Back",UDim2.fromOffset(0,0),UDim2.fromOffset(68,29),true)
+BackBtn.BackgroundColor3=C.purple
+BackBtn.BackgroundTransparency=.76
+local backOutline=stroke(BackBtn,.68); backOutline.Color=C.purple2
+local PageTitle=label(Nav,"",UDim2.fromOffset(80,0),UDim2.new(1,-80,0,31),13)
 PageTitle.Font=Enum.Font.GothamBold
 
 local AdminHost=Instance.new("Frame")
@@ -1029,9 +1508,12 @@ local function showAdminPage(name,push)
     end
     for n,p in pairs(AdminPages) do p.Visible=(n==name) end
     PageTitle.Text=name
+    Nav.Visible=(name~="Home")
+    Main.Size=UDim2.fromOffset(name=="Home" and 344 or 380,name=="Home" and 260 or 500)
+    AdminHost.Position=UDim2.fromOffset(11,name=="Home" and 70 or 112)
+    AdminHost.Size=UDim2.new(1,-22,1,name=="Home" and -80 or -123)
 end
 
-HomeBtn.MouseButton1Click:Connect(function() PageStack={}; showAdminPage("Home",false) end)
 BackBtn.MouseButton1Click:Connect(function()
     local n=table.remove(PageStack)
     if n then showAdminPage(n,false) else showAdminPage("Home",false) end
@@ -1041,37 +1523,36 @@ local HomePage=newAdminPage("Home",false)
 local EggsPage=newAdminPage("Spawn eggs",false)
 local PatternPage=newAdminPage("Mixed egg layouts",false)
 local AnnouncePage=newAdminPage("Announcements",false)
-local EventsPage=newAdminPage("Meteor event",false)
-local BoostsPage=newAdminPage("Boosts",true)
+local AdminAbusePage=newAdminPage("Admin Abuse",true)
 local NamesPage=newAdminPage("Names",false)
 local SettingsPage=newAdminPage("Settings",false)
-local AppearancePage=newAdminPage("Appearance",false)
 
 local Builders={}
 
 function Builders.Home()
 -- HOME
 local homeItems={
-    {"Eggs","Spawn eggs"},{"Announce","Announcements"},{"Events","Meteor event"},{"Boosts","Boosts"},
-    {"Console","CONSOLE"},{"Names","Names"},{"Settings","Settings"},{"Appearance","Appearance"}
+    {"Eggs","Spawn eggs"},{"Announce","Announcements"},{"Names","Names"},
+    {"Settings","Settings"},{"Admin Abuse","Admin Abuse"}
 }
 for i,item in ipairs(homeItems) do
     local row=math.floor((i-1)/2)
     local col=(i-1)%2
-    local b=button(HomePage,item[1],UDim2.new(col*.5,col==0 and 0 or 5,0,row*70+8),UDim2.new(.5,-5,0,58),true)
-    b.TextSize=12
-    b.MouseButton1Click:Connect(function()
-        if item[2]=="CONSOLE" then Console.Visible=true else showAdminPage(item[2],true) end
-    end)
+    local isCombined=(item[1]=="Admin Abuse")
+    local b=button(HomePage,item[1],UDim2.new(isCombined and 0 or col*.5,4,0,row*54+8),isCombined and UDim2.new(1,-8,0,44) or UDim2.new(.5,-8,0,44),true)
+    b.TextSize=11
+    b.BackgroundColor3=C.purple
+    b.BackgroundTransparency=.76
+    local outline=stroke(b,.72); outline.Color=C.purple2
+    b.MouseEnter:Connect(function() b.BackgroundTransparency=.63; outline.Transparency=.48 end)
+    b.MouseLeave:Connect(function() b.BackgroundTransparency=.76; outline.Transparency=.72 end)
+    b.MouseButton1Click:Connect(function() showAdminPage(item[2],true) end)
 end
-local hdesc=label(HomePage,"Choose what you want to do.",UDim2.new(0,4,1,-56),UDim2.new(1,-8,0,22),10)
-hdesc.TextColor3=C.muted
-local hstatus=label(HomePage,"v7 ready - portable for any LocalPlayer account",UDim2.new(0,4,1,-30),UDim2.new(1,-8,0,22),9)
-hstatus.TextColor3=C.muted
 
 end
 Builders.Home()
 Builders.Home=nil
+showAdminPage("Home",false)
 
 -- shared slider helper
 local function intSlider(parent,y,minv,maxv,step,initial,title,onChange)
@@ -1224,8 +1705,18 @@ end
 Builders.Announcements()
 Builders.Announcements=nil
 
-function Builders.Meteor()
--- METEOR EVENT
+function Builders.AdminAbuse()
+-- METEOR EVENT: the first section of the combined scrollable page.
+local AdminList=Instance.new("UIListLayout")
+AdminList.Padding=UDim.new(0,9)
+AdminList.SortOrder=Enum.SortOrder.LayoutOrder
+AdminList.Parent=AdminAbusePage
+local EventsPage=Instance.new("Frame")
+EventsPage.Name="MeteorControls"
+EventsPage.Size=UDim2.new(1,-8,0,322)
+EventsPage.BackgroundTransparency=1
+EventsPage.LayoutOrder=1
+EventsPage.Parent=AdminAbusePage
 local eventTitle=label(EventsPage,"DRILL MONSTER METEOR",UDim2.fromOffset(5,4),UDim2.new(1,-10,0,26),13); eventTitle.Font=Enum.Font.GothamBold
 local eventDesc=label(EventsPage,"4x Drill Monster + 10 Drilla eggs. If the monster model is visible to the client it is cloned; otherwise the eggs/meteor still run.",UDim2.fromOffset(5,34),UDim2.new(1,-10,0,70),10); eventDesc.TextWrapped=true; eventDesc.TextYAlignment=Enum.TextYAlignment.Top
 local meteorStatus=label(EventsPage,"Meteor display: cleared",UDim2.fromOffset(5,108),UDim2.new(1,-10,0,24),10); meteorStatus.TextColor3=C.muted
@@ -1242,23 +1733,16 @@ dropMeteorBtn.MouseButton1Click:Connect(function() local ok,msg=dropMeteorNow();
 setTimerBtn.MouseButton1Click:Connect(function() local s=math.clamp(tonumber(timerBox.Text) or 50,1,600); timerBox.Text=tostring(s); countdownBtn.Text="Start countdown - "..string.format("%02d:%02d",math.floor(s/60),s%60) end)
 clearMeteorBtn.MouseButton1Click:Connect(function() clearMeteor(); meteorStatus.Text="Meteor display: cleared"; meteorStatus.TextColor3=C.muted; countdownBtn.Text="Start countdown - 00:50" end)
 
-end
-Builders.Meteor()
-Builders.Meteor=nil
-
-function Builders.Boosts()
--- BOOSTS
-local BoostList=Instance.new("UIListLayout")
-BoostList.Padding=UDim.new(0,7)
-BoostList.Parent=BoostsPage
-local boostHeader=label(BoostsPage,"BOOSTS - local announce controls; configured remotes are called when present.",UDim2.new(),UDim2.new(1,-8,0,36),9)
-boostHeader.TextWrapped=true; boostHeader.TextColor3=C.muted
-for _,name in ipairs(BOOST_NAMES) do
+-- BOOSTS: all existing controls follow the meteor section.
+local boostHeader=label(AdminAbusePage,"BOOSTS - local announce controls; configured remotes are called when present.",UDim2.new(),UDim2.new(1,-8,0,36),9)
+boostHeader.TextWrapped=true; boostHeader.TextColor3=C.muted; boostHeader.LayoutOrder=2
+for index,name in ipairs(BOOST_NAMES) do
     local row=Instance.new("Frame")
     row.Size=UDim2.new(1,-8,0,86)
     row.BackgroundColor3=C.card
     row.BorderSizePixel=0
-    row.Parent=BoostsPage
+    row.Parent=AdminAbusePage
+    row.LayoutOrder=index+2
     corner(row,10); stroke(row,.62)
     local nm=label(row,name,UDim2.fromOffset(10,6),UDim2.new(1,-20,0,24),11); nm.Font=Enum.Font.GothamBold
     local state=label(row,"OFF",UDim2.fromOffset(10,39),UDim2.fromOffset(72,32),11); state.TextXAlignment=Enum.TextXAlignment.Center; state.Font=Enum.Font.GothamBold
@@ -1267,14 +1751,15 @@ for _,name in ipairs(BOOST_NAMES) do
     announce.MouseButton1Click:Connect(function() announceBoost(name,true); state.Text="ON"; state.TextColor3=C.green end)
     clear.MouseButton1Click:Connect(function() announceBoost(name,false); state.Text="OFF"; state.TextColor3=C.white end)
 end
-local clearAllBoosts=button(BoostsPage,"Clear all bottom effects",UDim2.new(),UDim2.new(1,-8,0,40),true)
+local clearAllBoosts=button(AdminAbusePage,"Clear all bottom effects",UDim2.new(),UDim2.new(1,-8,0,40),true)
+clearAllBoosts.LayoutOrder=#BOOST_NAMES+3
 clearAllBoosts.MouseButton1Click:Connect(function() for _,n in ipairs(BOOST_NAMES) do if BoostState[n] then announceBoost(n,false) end end end)
-BoostList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function() BoostsPage.CanvasSize=UDim2.fromOffset(0,BoostList.AbsoluteContentSize.Y+12) end)
-task.defer(function() BoostsPage.CanvasSize=UDim2.fromOffset(0,BoostList.AbsoluteContentSize.Y+12) end)
+AdminList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function() AdminAbusePage.CanvasSize=UDim2.fromOffset(0,AdminList.AbsoluteContentSize.Y+12) end)
+task.defer(function() AdminAbusePage.CanvasSize=UDim2.fromOffset(0,AdminList.AbsoluteContentSize.Y+12) end)
 
 end
-Builders.Boosts()
-Builders.Boosts=nil
+Builders.AdminAbuse()
+Builders.AdminAbuse=nil
 
 function Builders.Names()
 -- NAMES
@@ -1319,44 +1804,50 @@ end
 Builders.Settings()
 Builders.Settings=nil
 
-function Builders.Appearance()
--- APPEARANCE / ROLE
-section(AppearancePage,"OVERHEAD ROLE",8)
-local ownerRole=button(AppearancePage,"OWNER",UDim2.fromOffset(5,38),UDim2.new(.5,-8,0,42),true)
-local adminRole=button(AppearancePage,"ADMIN",UDim2.new(.5,3,0,38),UDim2.new(.5,-8,0,42),true)
-ownerRole.BackgroundColor3=C.red
-local appearanceStatus=label(AppearancePage,"OWNER is red. ADMIN is purple.",UDim2.fromOffset(7,94),UDim2.new(1,-14,0,45),10); appearanceStatus.TextWrapped=true; appearanceStatus.TextColor3=C.muted
-ownerRole.MouseButton1Click:Connect(function() Role="OWNER"; ownerRole.BackgroundColor3=C.red; adminRole.BackgroundColor3=C.card2; applyTag(); appearanceStatus.Text="OWNER tag applied."; appearanceStatus.TextColor3=C.green end)
-adminRole.MouseButton1Click:Connect(function() Role="ADMIN"; ownerRole.BackgroundColor3=C.card2; adminRole.BackgroundColor3=C.purple; applyTag(); appearanceStatus.Text="ADMIN tag applied."; appearanceStatus.TextColor3=C.green end)
-
-showAdminPage("Home",false)
-
-end
-Builders.Appearance()
-Builders.Appearance=nil
-
 function Builders.Morph()
--- MORPH PANEL - redesigned to match the reference Avatar Morpher.
-local MorphTabs=Instance.new("Frame"); MorphTabs.Position=UDim2.fromOffset(12,72); MorphTabs.Size=UDim2.new(1,-24,0,38); MorphTabs.BackgroundTransparency=1; MorphTabs.Parent=Morph
-local myAvatarBtn=button(MorphTabs,"MY AVATAR",UDim2.fromOffset(0,0),UDim2.new(.5,-5,0,36),false)
-local playersBtn=button(MorphTabs,"PLAYERS",UDim2.new(.5,5,0,0),UDim2.new(.5,-5,0,36),true)
-local preview=Instance.new("ImageLabel"); preview.Position=UDim2.fromOffset(13,121); preview.Size=UDim2.fromOffset(92,92); preview.BackgroundColor3=C.card2; preview.BorderSizePixel=0; preview.Image="rbxthumb://type=AvatarHeadShot&id="..P.UserId.."&w=150&h=150"; preview.Parent=Morph; corner(preview,12)
-local morphLabel=label(Morph,"ROBLOX USERNAME",UDim2.fromOffset(118,121),UDim2.new(1,-130,0,22),10); morphLabel.TextColor3=C.muted; morphLabel.Font=Enum.Font.GothamBold
-local morphInput=textbox(Morph,"Enter exact username",UDim2.fromOffset(118,148),UDim2.new(1,-130,0,48),"")
-local morphBtn=button(Morph,"MORPH",UDim2.fromOffset(13,222),UDim2.new(.62,-18,0,43),false)
-local resetMorphBtn=button(Morph,"RESET",UDim2.new(.62,0,0,222),UDim2.new(.38,-13,0,43),true)
-local morphStatus=label(Morph,"Physics-isolated shell: it never moves or welds to your real character.",UDim2.fromOffset(13,270),UDim2.new(1,-26,0,24),8); morphStatus.TextWrapped=true; morphStatus.TextColor3=C.muted
-myAvatarBtn.MouseButton1Click:Connect(function() morphInput.Text=P.Name; preview.Image="rbxthumb://type=AvatarHeadShot&id="..P.UserId.."&w=150&h=150"; myAvatarBtn.BackgroundColor3=C.purple; playersBtn.BackgroundColor3=C.card2 end)
-playersBtn.MouseButton1Click:Connect(function() morphInput.Text=""; myAvatarBtn.BackgroundColor3=C.card2; playersBtn.BackgroundColor3=C.purple end)
-morphInput.FocusLost:Connect(function() local u=morphInput.Text:gsub("^%s+",""):gsub("%s+$",""); if u~="" then local id; if pcall(function() id=Players:GetUserIdFromNameAsync(u) end) then preview.Image="rbxthumb://type=AvatarHeadShot&id="..id.."&w=150&h=150" end end end)
+-- Compact morph controls; Reset returns both the character and this preview to the player's account.
+local ownPreview="rbxthumb://type=AvatarHeadShot&id="..P.UserId.."&w=150&h=150"
+local preview=Instance.new("ImageLabel"); preview.Position=UDim2.fromOffset(12,73); preview.Size=UDim2.fromOffset(78,78); preview.BackgroundColor3=C.card2; preview.BorderSizePixel=0; preview.Image=ownPreview; preview.Parent=Morph; corner(preview,10)
+local morphLabel=label(Morph,"ROBLOX USERNAME",UDim2.fromOffset(102,76),UDim2.new(1,-114,0,18),10); morphLabel.TextColor3=C.muted; morphLabel.Font=Enum.Font.GothamBold
+local morphInput=textbox(Morph,"Enter exact username",UDim2.fromOffset(102,101),UDim2.new(1,-114,0,43),"")
+local morphBtn=button(Morph,"MORPH",UDim2.fromOffset(12,158),UDim2.new(.62,-18,0,37),false)
+local resetMorphBtn=button(Morph,"RESET",UDim2.new(.62,0,0,158),UDim2.new(.38,-12,0,37),true)
+local roleLabel=label(Morph,"OVERHEAD ROLE",UDim2.fromOffset(12,203),UDim2.new(1,-24,0,16),9); roleLabel.TextColor3=C.muted; roleLabel.Font=Enum.Font.GothamBold
+local morphOwnerRole=button(Morph,"OWNER",UDim2.fromOffset(12,224),UDim2.new(1/3,-12,0,30),true)
+local morphCoownerRole=button(Morph,"CO-OWNER",UDim2.new(1/3,6,0,224),UDim2.new(1/3,-12,0,30),true)
+local morphAdminRole=button(Morph,"ADMIN",UDim2.new(2/3,0,0,224),UDim2.new(1/3,-12,0,30),true)
+addRoleSelector(morphOwnerRole,morphCoownerRole,morphAdminRole)
+local morphStatus=label(Morph,"Visual morph only.",UDim2.fromOffset(12,262),UDim2.new(1,-24,0,18),8); morphStatus.TextWrapped=true; morphStatus.TextColor3=C.muted
+local previewRequest=0
+local function selectOwnAvatar()
+    previewRequest=previewRequest+1
+    morphInput.Text=P.Name
+    preview.Image=ownPreview
+end
+morphInput.FocusLost:Connect(function()
+    local u=morphInput.Text:gsub("^%s+",""):gsub("%s+$","")
+    previewRequest=previewRequest+1
+    local request=previewRequest
+    if u=="" then return end
+    local id
+    local ok=pcall(function() id=Players:GetUserIdFromNameAsync(u) end)
+    if ok and request==previewRequest then
+        preview.Image="rbxthumb://type=AvatarHeadShot&id="..id.."&w=150&h=150"
+    end
+end)
 morphBtn.MouseButton1Click:Connect(function()
     local u=morphInput.Text:gsub("^%s+",""):gsub("%s+$","")
     if u=="" then morphStatus.Text="Enter a Roblox username."; morphStatus.TextColor3=C.orange; return end
     morphBtn.Text="LOADING..."
-    if callRemote("Morph",{Username=u}) then morphStatus.Text="Server morph request sent."; morphStatus.TextColor3=C.green else local ok,msg=doMorph(u); morphStatus.Text=msg; morphStatus.TextColor3=ok and C.green or C.red end
+    local ok,msg=doMorph(u); morphStatus.Text=msg; morphStatus.TextColor3=ok and C.green or C.red
     morphBtn.Text="MORPH"
 end)
-resetMorphBtn.MouseButton1Click:Connect(function() resetMorph(); morphStatus.Text="Original appearance restored."; morphStatus.TextColor3=C.green end)
+resetMorphBtn.MouseButton1Click:Connect(function()
+    resetMorph()
+    selectOwnAvatar()
+    morphStatus.Text="Original appearance restored."
+    morphStatus.TextColor3=C.green
+end)
 
 end
 Builders.Morph()
@@ -1502,4 +1993,3 @@ end)
 P.CharacterAdded:Connect(function() HeldEgg=nil; Carry.Visible=false; resetMorph(); task.wait(.5); applyTag() end)
 applyTag()
 return true
-
