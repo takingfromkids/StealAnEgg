@@ -392,7 +392,7 @@ local function templateInfo(name)
         return nil
     end
 
-    local info={template=clone,bottomOffset=0}
+    local info={template=clone,bottomOffset=0,size=Vector3.new(4,4,4)}
     if clone:IsA("Model") then
         pcall(function() clone:PivotTo(CFrame.new()) end)
         local okBox,cf,sz=pcall(function()
@@ -405,6 +405,7 @@ local function templateInfo(name)
             return nil
         end
         info.bottomOffset=cf.Position.Y-sz.Y/2
+        info.size=sz
     else
         clone.CFrame=CFrame.new()
         if clone.Size.Magnitude<.1 or math.max(clone.Size.X,clone.Size.Y,clone.Size.Z)>80 then
@@ -413,6 +414,7 @@ local function templateInfo(name)
             return nil
         end
         info.bottomOffset=-clone.Size.Y/2
+        info.size=clone.Size
     end
 
     clone.Parent=nil
@@ -694,7 +696,7 @@ local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
     return mapCF,mapBounds
 end
 
-local function physicalLayout(count,sizeValue,baseCF,bounds,pattern)
+local function physicalLayout(count,sizeValue,baseCF,bounds,pattern,footprintX,footprintZ)
     local scale=math.clamp(sizeValue,25,500)/100
     local cols
     if pattern=="ORIGINAL 6x20" then
@@ -717,10 +719,15 @@ local function physicalLayout(count,sizeValue,baseCF,bounds,pattern)
     cols=math.min(cols,count)
     local rows=math.ceil(count/math.max(cols,1))
 
-    -- Small, clearly visible gaps. The grid can expand a little to use more of
-    -- the available arena length, but it will NEVER expand beyond a modest gap.
-    local naturalX=math.max(8.0,6.0+scale*2.15)
-    local naturalZ=math.max(10.0,7.0+scale*2.75)
+    -- Base spacing on the REAL visual footprint of the selected eggs. This gives
+    -- a small visible air gap even when the egg scale changes or a larger egg type
+    -- is mixed in, instead of guessing one spacing value for every model.
+    local actualX=math.max(1,tonumber(footprintX) or (4*scale))
+    local actualZ=math.max(1,tonumber(footprintZ) or (4*scale))
+    local gapX=math.max(1.15,.65*scale)
+    local gapZ=math.max(1.75,.9*scale)
+    local naturalX=math.max(7.25,actualX+gapX)
+    local naturalZ=math.max(9.0,actualZ+gapZ)
     local usableWidth=((bounds and bounds.X) or COMPACT_SPAWN_BOUNDS.X)*.96
     local usableDepth=((bounds and bounds.Z) or COMPACT_SPAWN_BOUNDS.Z)*.96
 
@@ -750,8 +757,8 @@ local function physicalLayout(count,sizeValue,baseCF,bounds,pattern)
 
     return cols,rows,sx,sz
 end
-local function layoutPosition(index,count,sizeValue,baseCF,bounds,pattern)
-    local cols,rows,sx,sz=physicalLayout(count,sizeValue,baseCF,bounds,pattern)
+local function layoutPosition(index,count,sizeValue,baseCF,bounds,pattern,footprintX,footprintZ)
+    local cols,rows,sx,sz=physicalLayout(count,sizeValue,baseCF,bounds,pattern,footprintX,footprintZ)
     local row=math.floor((index-1)/cols)
     local col=(index-1)%cols
 
@@ -935,6 +942,27 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     size=math.clamp(tonumber(size) or 100,25,500)
     pattern=pattern or PATTERNS[1]
 
+    -- Measure this batch before placing it. For MIXED we use the largest visual
+    -- footprint in the available set so no larger egg silently closes the gap.
+    local baseFootX=4
+    local baseFootZ=4
+    local function includeFootprint(eggName)
+        local inf=eggName and templateInfo(eggName) or nil
+        local sz=inf and inf.size or nil
+        if sz then
+            baseFootX=math.max(baseFootX,sz.X)
+            baseFootZ=math.max(baseFootZ,sz.Z)
+        end
+    end
+    if name=="MIXED" then
+        for _,eggName in ipairs(mix) do includeFootprint(eggName) end
+    else
+        includeFootprint(name)
+    end
+    local visualScale=size/100
+    local footprintX=baseFootX*visualScale
+    local footprintZ=baseFootZ*visualScale
+
     local baseCF,bounds=visibleSpawnFrame(customCF,count,pattern,size)
     local centerHit=groundHitNear(baseCF.Position,nil)
     local baseY=centerHit and centerHit.Position.Y or baseCF.Position.Y
@@ -948,7 +976,7 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     local lastRows=0
 
     for i=1,count do
-        local wanted,row,col,cols,rows,_,_,rowCols=layoutPosition(i,count,size,baseCF,bounds,pattern)
+        local wanted,row,col,cols,rows,_,_,rowCols=layoutPosition(i,count,size,baseCF,bounds,pattern,footprintX,footprintZ)
         lastCols=cols
         lastRows=rows
 
