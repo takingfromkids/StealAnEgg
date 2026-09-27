@@ -339,84 +339,94 @@ local function findEgg(name)
     return nil
 end
 
--- Keep every configured type available. If the live game does not replicate a
--- particular visual to this client, spawnEggs creates a lightweight local egg
--- instead of failing the whole batch.
+-- Build a stripped visual template from the REAL egg object already replicated by the game.
+-- Scripts, sounds, particles and interaction objects are removed once so large batches
+-- can keep the original mesh/texture/decal appearance without cloning the heavy behavior.
+local EggTemplateCache={}
+
+local function stripEggTemplate(o)
+    local remove={}
+    for _,x in ipairs(o:GetDescendants()) do
+        if x:IsA("Script") or x:IsA("LocalScript") or x:IsA("ModuleScript")
+            or x:IsA("ProximityPrompt") or x:IsA("ClickDetector")
+            or x:IsA("Humanoid") or x:IsA("Animator")
+            or x:IsA("Sound") or x:IsA("ParticleEmitter")
+            or x:IsA("Trail") or x:IsA("Beam")
+            or x:IsA("BodyMover") or x:IsA("Constraint") then
+            table.insert(remove,x)
+        elseif x:IsA("BasePart") then
+            x.Anchored=true
+            x.CanCollide=false
+            x.CanTouch=false
+            x.CanQuery=true
+            x.Massless=true
+            x.CastShadow=false
+        end
+    end
+    for _,x in ipairs(remove) do pcall(function() x:Destroy() end) end
+end
+
+local function templateInfo(name)
+    local cached=EggTemplateCache[name]
+    if cached~=nil then return cached or nil end
+
+    local source=findEgg(name)
+    if not source then
+        EggTemplateCache[name]=false
+        return nil
+    end
+
+    local ok,clone=pcall(function() return source:Clone() end)
+    if not ok or not clone then
+        EggTemplateCache[name]=false
+        return nil
+    end
+
+    clone.Name=name
+    stripEggTemplate(clone)
+
+    local root=rootOf(clone)
+    if not root then
+        pcall(function() clone:Destroy() end)
+        EggTemplateCache[name]=false
+        return nil
+    end
+
+    local info={template=clone,bottomOffset=0}
+    if clone:IsA("Model") then
+        pcall(function() clone:PivotTo(CFrame.new()) end)
+        local okBox,cf,sz=pcall(function()
+            local c,z=clone:GetBoundingBox()
+            return c,z
+        end)
+        if not okBox or not cf or not sz or sz.Magnitude<.1 or math.max(sz.X,sz.Y,sz.Z)>80 then
+            pcall(function() clone:Destroy() end)
+            EggTemplateCache[name]=false
+            return nil
+        end
+        info.bottomOffset=cf.Position.Y-sz.Y/2
+    else
+        clone.CFrame=CFrame.new()
+        if clone.Size.Magnitude<.1 or math.max(clone.Size.X,clone.Size.Y,clone.Size.Z)>80 then
+            pcall(function() clone:Destroy() end)
+            EggTemplateCache[name]=false
+            return nil
+        end
+        info.bottomOffset=-clone.Size.Y/2
+    end
+
+    clone.Parent=nil
+    EggTemplateCache[name]=info
+    return info
+end
+
 local function availableEggs()
     local a={}
-    for i=2,arrlen(EGGS) do table.insert(a,EGGS[i]) end
+    for i=2,arrlen(EGGS) do
+        local name=EGGS[i]
+        if templateInfo(name) then table.insert(a,name) end
+    end
     return a
-end
-
-local function fallbackEgg(name)
-    -- One visible part per egg keeps 200-500 egg batches responsive.
-    local part=Instance.new("Part")
-    part.Name=name
-    part.Size=Vector3.new(2.8,3.5,2.8)
-    part.Anchored=true
-    part.CanCollide=false
-    part.CanTouch=false
-    part.CanQuery=true
-    part.CastShadow=false
-    part.Material=Enum.Material.SmoothPlastic
-
-    local hash=0
-    for i=1,#name do hash=(hash+string.byte(name,i)*i)%360 end
-    part.Color=Color3.fromHSV(hash/360,.62,1)
-
-    local mesh=Instance.new("SpecialMesh")
-    mesh.MeshType=Enum.MeshType.Sphere
-    mesh.Scale=Vector3.new(1,1.28,1)
-    mesh.Parent=part
-    return part
-end
-
-local function sanitizeEggClone(clone)
-    -- Keep only the visual/physical asset. Cloned game scripts or prompts can
-    -- delete/move the copy and were one reason large batches vanished.
-    for _,o in ipairs(clone:GetDescendants()) do
-        if o:IsA("Script") or o:IsA("LocalScript") or o:IsA("ModuleScript")
-            or o:IsA("ProximityPrompt") or o:IsA("ClickDetector") then
-            pcall(function() o:Destroy() end)
-        end
-    end
-end
-
-local function cloneLooksUsable(clone)
-    local visible=false
-    local parts=0
-    if clone:IsA("BasePart") then
-        parts=1
-        visible=clone.Transparency<.95 and clone.Size.Magnitude>.1
-        return visible
-    end
-    if not clone:IsA("Model") then return false end
-    for _,o in ipairs(clone:GetDescendants()) do
-        if o:IsA("BasePart") then
-            parts=parts+1
-            if o.Transparency<.95 and o.Size.Magnitude>.1 then visible=true end
-            if parts>120 then return false end
-        end
-    end
-    if not visible then return false end
-    local ok,size=pcall(function() return clone:GetExtentsSize() end)
-    if not ok or size.Magnitude<.1 or math.max(size.X,size.Y,size.Z)>90 then return false end
-    return true
-end
-
-local function cloneEggVisual(source,name)
-    if source then
-        local ok,clone=pcall(function() return source:Clone() end)
-        if ok and clone then
-            clone.Name=name
-            sanitizeEggClone(clone)
-            if cloneLooksUsable(clone) then
-                return clone,false
-            end
-            pcall(function() clone:Destroy() end)
-        end
-    end
-    return fallbackEgg(name),true
 end
 
 -- Map-center detection. General egg spawning is anchored to this map frame, never the player.
@@ -633,50 +643,100 @@ local function dropHeld()
     local r=P.Character and P.Character:FindFirstChild("HumanoidRootPart"); if not r then return end; local e=HeldEgg; HeldEgg=nil; dropEgg(e,r.Position+r.CFrame.LookVector*6,false); Carry.Visible=false
 end
 CarryDrop.MouseButton1Click:Connect(dropHeld)
-local function registerEgg(egg,name,scale,withPrompt)
-    local r=rootOf(egg); if not r then return end
-    local pr=nil
-    if withPrompt then
-        pr=Instance.new("ProximityPrompt")
-        pr.ActionText="Pick Up Egg"
-        pr.ObjectText=name
-        pr.KeyboardKeyCode=Enum.KeyCode.E
-        pr.HoldDuration=.05
-        pr.MaxActivationDistance=12
-        pr.RequiresLineOfSight=false
-        pr.Parent=r
-        pr.Triggered:Connect(function()
-            if HeldEgg then return end
-            local cr=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
-            if cr and carryEgg(egg,cr,"PLAYER",P.Character) then
-                HeldEgg=egg
-                CarryName.Text="CARRYING: "..name
-                Carry.Visible=true
-            end
-        end)
-    end
-    EggState[egg]={name=name,scale=scale,prompt=pr,carried=false,delivered=false,claim=nil}
+local EggByRoot={}
+local PickupPrompt=Instance.new("ProximityPrompt")
+PickupPrompt.Name="SAE_PickupPrompt"
+PickupPrompt.ActionText="Pick Up Egg"
+PickupPrompt.ObjectText="Egg"
+PickupPrompt.KeyboardKeyCode=Enum.KeyCode.E
+PickupPrompt.HoldDuration=.05
+PickupPrompt.MaxActivationDistance=12
+PickupPrompt.RequiresLineOfSight=false
+PickupPrompt.Enabled=false
+
+local function registerEgg(egg,name,scale)
+    local r=rootOf(egg)
+    if not r then return end
+    EggState[egg]={name=name,scale=scale,prompt=nil,carried=false,delivered=false,claim=nil}
+    EggByRoot[r]=egg
 end
+
+PickupPrompt.Triggered:Connect(function()
+    local r=PickupPrompt.Parent
+    local egg=r and EggByRoot[r] or nil
+    if not egg or HeldEgg then return end
+    local cr=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
+    if cr and carryEgg(egg,cr,"PLAYER",P.Character) then
+        HeldEgg=egg
+        CarryName.Text="CARRYING: "..(EggState[egg] and EggState[egg].name or egg.Name)
+        Carry.Visible=true
+        PickupPrompt.Enabled=false
+    end
+end)
+
+-- Only one live prompt is needed, even for 500 eggs. It follows the nearest egg.
+task.spawn(function()
+    while Gui.Parent do
+        task.wait(.12)
+        if HeldEgg then
+            PickupPrompt.Enabled=false
+        else
+            local cr=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
+            local nearest=nil
+            local nearestRoot=nil
+            local best=12
+            if cr then
+                for egg,st in pairs(EggState) do
+                    if egg and egg.Parent and not st.carried and not st.delivered then
+                        local r=rootOf(egg)
+                        if r then
+                            local d=(r.Position-cr.Position).Magnitude
+                            if d<best then
+                                best=d
+                                nearest=egg
+                                nearestRoot=r
+                            end
+                        end
+                    end
+                end
+            end
+            if nearest and nearestRoot then
+                if PickupPrompt.Parent~=nearestRoot then PickupPrompt.Parent=nearestRoot end
+                PickupPrompt.ObjectText=EggState[nearest].name or nearest.Name
+                PickupPrompt.Enabled=true
+            else
+                PickupPrompt.Enabled=false
+            end
+        end
+    end
+end)
+
 local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     local mix=nil
-    if name=="MIXED" then mix=availableEggs() end
+    if name=="MIXED" then
+        mix=availableEggs()
+        if arrlen(mix)==0 then
+            return false,"None of the configured egg visuals are replicated to this client."
+        end
+    elseif not templateInfo(name) then
+        return false,name.." visual is not replicated to this client."
+    end
 
     count=math.clamp(tonumber(count) or 1,1,500)
     size=math.clamp(tonumber(size) or 100,25,500)
     pattern=pattern or PATTERNS[1]
 
     local baseCF,bounds=visibleSpawnFrame(customCF)
+    local centerHit=groundHitNear(baseCF.Position,nil)
+    local baseY=centerHit and centerHit.Position.Y or baseCF.Position.Y
+    local forward=Vector3.new(baseCF.LookVector.X,0,baseCF.LookVector.Z)
+    if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
+    baseCF=CFrame.lookAt(Vector3.new(baseCF.Position.X,baseY,baseCF.Position.Z),
+        Vector3.new(baseCF.Position.X,baseY,baseCF.Position.Z)+forward)
+
     local made=0
     local lastCols=0
     local lastRows=0
-    local usePrompts=count<=80
-
-    -- Use one ground height for the whole batch. Hundreds of raycasts and
-    -- hundreds of cloned game models were causing the freezes.
-    local centerHit=groundHitNear(baseCF.Position,nil)
-    local baseY=centerHit and centerHit.Position.Y or baseCF.Position.Y
-    baseCF=CFrame.new(baseCF.Position.X,baseY,baseCF.Position.Z)
-        * CFrame.Angles(0,math.atan2(-baseCF.LookVector.X,-baseCF.LookVector.Z),0)
 
     for i=1,count do
         local wanted,row,col,cols,rows=layoutPosition(i,count,size,baseCF,bounds)
@@ -685,32 +745,45 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
 
         local en=name
         if name=="MIXED" then en=mixedEggFor(pattern,mix,row,col,i,cols) end
-        en=en or "Egg"
 
-        local egg=fallbackEgg(en)
-        egg.Name=en
-        if batchTag then egg:SetAttribute("SAE_Batch",batchTag) end
-        egg.Parent=EggFolder
+        local info=en and templateInfo(en) or nil
+        if info then
+            local ok=pcall(function()
+                local egg=info.template:Clone()
+                egg.Name=en
+                if batchTag then egg:SetAttribute("SAE_Batch",batchTag) end
+                egg.Parent=EggFolder
 
-        local scale=scaleEgg(egg,size)
-        eggPhysics(egg,true)
+                local scale=scaleEgg(egg,size)
+                eggPhysics(egg,true)
 
-        -- Direct placement: these are single-part eggs, so no bounding-box scan is needed.
-        local half=egg.Size.Y/2
-        egg.CFrame=CFrame.new(wanted.X,baseY+half+.08,wanted.Z)
-        registerEgg(egg,en,scale,usePrompts)
-        made=made+1
+                local y=baseY-(info.bottomOffset*scale)+.08
+                local cf=CFrame.new(wanted.X,y,wanted.Z)
+                pivot(egg,cf)
 
-        if i%40==0 then task.wait() end
+                registerEgg(egg,en,scale)
+                made=made+1
+            end)
+        end
+
+        if i%25==0 then task.wait() end
     end
 
-    return true,made,lastCols,lastRows,count
+    if made<=0 then
+        return false,"The game egg visuals were found, but none could be cloned."
+    end
+    return true,made,lastCols,lastRows,0
 end
 
 local function clearSpawnedEggs(batchTag)
     local removed=0
     for _,e in ipairs(EggFolder:GetChildren()) do
         if (not batchTag) or e:GetAttribute("SAE_Batch")==batchTag then
+            local r=rootOf(e)
+            if r then
+                if PickupPrompt.Parent==r then PickupPrompt.Enabled=false; PickupPrompt.Parent=nil end
+                EggByRoot[r]=nil
+            end
             EggState[e]=nil
             pcall(function() e:Destroy() end)
             removed=removed+1
@@ -1880,7 +1953,7 @@ spawnBtn.MouseButton1Click:Connect(function()
     else
         local ok,made,cols,rows,fallbacks=spawnEggs(en,Amount,EggSize,Pattern,nil,"GENERAL")
         if ok then
-            spawnStatus.Text="Spawned "..tostring(made).." / "..tostring(Amount).." visible eggs - "..Pattern.." - "..tostring(cols).." per row / "..tostring(rows).." rows."
+            spawnStatus.Text="Spawned "..tostring(made).." / "..tostring(Amount).." real egg visuals - "..Pattern.." - "..tostring(cols).." per row / "..tostring(rows).." rows."
             spawnStatus.TextColor3=C.green
             notice(P.UserId,Display,": spawned",tostring(made).." EGGS","")
         else
@@ -2034,7 +2107,7 @@ setMapBtn.MouseButton1Click:Connect(function() local ok,msg=setMapCenterHere(); 
 hideMapMarker.MouseButton1Click:Connect(function() mapMarkerVisible=not mapMarkerVisible; if MapMarker then MapMarker.Transparency=mapMarkerVisible and .72 or 1 end end)
 local rescanBtn=button(SettingsPage,"Rescan egg models",UDim2.fromOffset(0,166),UDim2.new(1,0,0,38),true)
 local settingsInfo=label(SettingsPage,"No account lock is used. Your friend can run the same file; LocalPlayer is resolved at runtime.",UDim2.fromOffset(5,217),UDim2.new(1,-10,0,58),9); settingsInfo.TextWrapped=true; settingsInfo.TextColor3=C.muted
-rescanBtn.MouseButton1Click:Connect(function() EggCache={}; settingsInfo.Text="Egg model cache cleared. Models will be re-detected on the next spawn."; settingsInfo.TextColor3=C.green end)
+rescanBtn.MouseButton1Click:Connect(function() EggCache={}; EggTemplateCache={}; settingsInfo.Text="Egg visual cache cleared. Real game egg visuals will be re-detected on the next spawn."; settingsInfo.TextColor3=C.green end)
 
 
 -- Start map-center detection after the UI exists. Kept inside this scope so
