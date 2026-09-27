@@ -554,19 +554,36 @@ local function getMapFrame()
     return MapCF or CFrame.new(), MapSize or Vector3.new(140,1,220)
 end
 
-local function visibleSpawnFrame(preferredCF)
+local function visibleSpawnFrame(preferredCF,count)
     if preferredCF then
         return preferredCF,Vector3.new(180,1,220)
     end
 
-    -- Normal egg spawning is ALWAYS tied to the map centre, never LocalPlayer.
-    local cf,bounds=getMapFrame()
-    if MapName=="Fallback center" then
-        -- Retry once in case the map finished loading after the UI.
-        detectMapCenter()
-        cf,bounds=getMapFrame()
+    -- Normal egg spawning follows the player's CURRENT position and facing.
+    -- The whole field is pushed behind the player so it never uses the Safe Zone.
+    local root=P.Character and P.Character:FindFirstChild("HumanoidRootPart")
+    if root then
+        local forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
+        if forward.Magnitude<.01 then forward=Vector3.new(0,0,-1) else forward=forward.Unit end
+
+        local hit=groundHitNear(root.Position,nil)
+        local ground=hit and hit.Position or (root.Position-Vector3.new(0,3,0))
+
+        -- Larger batches need a little more rear offset so the nearest row still
+        -- starts behind the player instead of wrapping around them.
+        local amount=math.clamp(tonumber(count) or 200,1,500)
+        local backDistance=70+(amount*.10)
+        local center=ground-forward*backDistance
+
+        local probe=Vector3.new(center.X,root.Position.Y,center.Z)
+        local backHit=groundHitNear(probe,nil)
+        if backHit then center=backHit.Position else center=Vector3.new(center.X,ground.Y,center.Z) end
+
+        return CFrame.lookAt(center,center+forward),Vector3.new(180,1,220)
     end
-    return cf,bounds
+
+    -- Character unavailable: only then fall back to the detected map frame.
+    return getMapFrame()
 end
 
 local function physicalLayout(count,sizeValue,baseCF,bounds)
@@ -752,7 +769,7 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     size=math.clamp(tonumber(size) or 100,25,500)
     pattern=pattern or PATTERNS[1]
 
-    local baseCF,bounds=visibleSpawnFrame(customCF)
+    local baseCF,bounds=visibleSpawnFrame(customCF,count)
     local centerHit=groundHitNear(baseCF.Position,nil)
     local baseY=centerHit and centerHit.Position.Y or baseCF.Position.Y
     local forward=Vector3.new(baseCF.LookVector.X,0,baseCF.LookVector.Z)
@@ -2045,16 +2062,16 @@ amountButtons[200].BackgroundColor3=C.purple
 
 local sizeValue=function() return EggSize end
 sizeValue=intSlider(EggsPage,217,25,500,5,100,"Egg scale",function(v) EggSize=v end)
-local spawnBtn=button(EggsPage,"Spawn eggs in MAP CENTER",UDim2.fromOffset(4,275),UDim2.new(1,-8,0,38),false)
+local spawnBtn=button(EggsPage,"Spawn eggs BEHIND ME",UDim2.fromOffset(4,275),UDim2.new(1,-8,0,38),false)
 local clearEggBtn=button(EggsPage,"Clear spawned eggs",UDim2.fromOffset(4,320),UDim2.new(1,-8,0,34),true)
-local spawnStatus=label(EggsPage,"Always spawns from the detected middle of the map, regardless of where you stand.",UDim2.fromOffset(5,361),UDim2.new(1,-10,0,42),9)
+local spawnStatus=label(EggsPage,"Spawns behind your current position, facing the same direction as you.",UDim2.fromOffset(5,361),UDim2.new(1,-10,0,42),9)
 spawnStatus.TextWrapped=true; spawnStatus.TextColor3=C.muted
 spawnBtn.MouseButton1Click:Connect(function()
     spawnBtn.Text="SPAWNING..."
     local en=EGGS[EggIndex]
     -- Each click is one clean batch, so choosing 500 means exactly 500 GENERAL eggs.
     clearSpawnedEggs("GENERAL")
-    if callRemote("SpawnEggs",{Egg=en,Quantity=Amount,Size=EggSize,Pattern=Pattern,MapCenter=true}) then
+    if callRemote("SpawnEggs",{Egg=en,Quantity=Amount,Size=EggSize,Pattern=Pattern,BehindPlayer=true}) then
         spawnStatus.Text="Server spawn request sent."
         spawnStatus.TextColor3=C.green
     else
@@ -2067,7 +2084,7 @@ spawnBtn.MouseButton1Click:Connect(function()
             spawnStatus.Text=tostring(made); spawnStatus.TextColor3=C.red
         end
     end
-    spawnBtn.Text="Spawn eggs in MAP CENTER"
+    spawnBtn.Text="Spawn eggs BEHIND ME"
 end)
 clearEggBtn.MouseButton1Click:Connect(function() local n=clearSpawnedEggs(); spawnStatus.Text="Cleared "..n.." spawned egg(s)."; spawnStatus.TextColor3=C.green end)
 
