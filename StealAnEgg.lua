@@ -1822,8 +1822,6 @@ for i,v in ipairs(amountValues) do
     b.MouseButton1Click:Connect(function()
         Amount=value
         for k,x in pairs(amountButtons) do x.BackgroundColor3=(k==Amount) and C.purple or C.card2 end
-        spawnStatus.Text="Quantity selected: "..tostring(Amount)
-        spawnStatus.TextColor3=C.muted
     end)
 end
 amountButtons[200].BackgroundColor3=C.purple
