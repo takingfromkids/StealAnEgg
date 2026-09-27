@@ -554,7 +554,7 @@ local function getMapFrame()
     return MapCF or CFrame.new(), MapSize or Vector3.new(140,1,220)
 end
 
-local function visibleSpawnFrame(preferredCF,count)
+local function visibleSpawnFrame(preferredCF,count,pattern,sizeValue)
     if preferredCF then
         return preferredCF,Vector3.new(180,1,220)
     end
@@ -572,8 +572,15 @@ local function visibleSpawnFrame(preferredCF,count)
         -- Put the front row behind the player even with the larger row gaps.
         local amount=math.clamp(tonumber(count) or 200,1,500)
         local estimatedCols=20
+        if pattern=="ONE TYPE PER ROW" or pattern=="ALTERNATING ROWS" then
+            estimatedCols=16
+        elseif pattern=="SPLIT ROWS 3+3" or pattern=="PAIRS 2+2+2" then
+            estimatedCols=18
+        end
         local estimatedRows=math.ceil(amount/estimatedCols)
-        local halfDepth=(estimatedRows-1)*22/2
+        local scale=math.clamp(tonumber(sizeValue) or 100,25,500)/100
+        local estimatedRowGap=math.max(22,14+scale*8)
+        local halfDepth=(estimatedRows-1)*estimatedRowGap/2
         local backDistance=32+halfDepth
         local center=ground-forward*backDistance
 
@@ -793,7 +800,7 @@ local function spawnEggs(name,count,size,pattern,customCF,batchTag)
     size=math.clamp(tonumber(size) or 100,25,500)
     pattern=pattern or PATTERNS[1]
 
-    local baseCF,bounds=visibleSpawnFrame(customCF,count)
+    local baseCF,bounds=visibleSpawnFrame(customCF,count,pattern,size)
     local centerHit=groundHitNear(baseCF.Position,nil)
     local baseY=centerHit and centerHit.Position.Y or baseCF.Position.Y
     local forward=Vector3.new(baseCF.LookVector.X,0,baseCF.LookVector.Z)
